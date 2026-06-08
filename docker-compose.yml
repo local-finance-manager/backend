@@ -1,0 +1,31 @@
+name: financas
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "19742:19742"
+    volumes:
+      # Config (client_id, client_secret) e token OAuth2
+      - ${HOME}/.config/financas:/root/.config/financas
+      # Banco de dados SQLite
+      - ${HOME}/.local/share/financas:/root/.local/share/financas
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/server", "--health-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ../financas-front
+      dockerfile: Dockerfile
+    ports:
+      - "19741:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
