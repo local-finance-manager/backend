@@ -72,7 +72,7 @@ func ParsePagination(r *http.Request, defaults Pagination, allowedOrderBy []stri
 
 // PagedResult is a generic paginated response container.
 type PagedResult[T any] struct {
-	Data       []T      `json:"data"`
+	Data       []T       `json:"data"`
 	Pagination PagedMeta `json:"pagination"`
 }
 

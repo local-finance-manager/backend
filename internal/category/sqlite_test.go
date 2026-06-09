@@ -395,6 +395,34 @@ func TestSubcategoryRepo_List_Pagination(t *testing.T) {
 	}
 }
 
+func TestSubcategoryRepo_Update(t *testing.T) {
+	db := newTestDB(t)
+	catRepo := category.NewSQLiteCategoryRepository(db)
+	subRepo := category.NewSQLiteSubcategoryRepository(db)
+	ctx := context.Background()
+
+	catRepo.Create(ctx, mkCat("cat-1", "T", category.Expense, true))
+	subRepo.Create(ctx, mkSub("sub-upd", "cat-1", "Old Name", true))
+
+	s := mkSub("sub-upd", "cat-1", "New Name", true)
+	s.Icon = "new-icon"
+	s.Color = "#123456"
+	if err := subRepo.Update(ctx, s); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got, err := subRepo.Get(ctx, "sub-upd")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != "New Name" {
+		t.Errorf("name: got %q, want New Name", got.Name)
+	}
+	if got.Icon != "new-icon" {
+		t.Errorf("icon: got %q, want new-icon", got.Icon)
+	}
+}
+
 func TestSubcategoryRepo_Delete(t *testing.T) {
 	db := newTestDB(t)
 	catRepo := category.NewSQLiteCategoryRepository(db)
@@ -419,5 +447,64 @@ func TestSubcategoryRepo_DeleteNotFound(t *testing.T) {
 	err := repo.Delete(context.Background(), "nonexistent")
 	if err == nil {
 		t.Error("expected not-found error")
+	}
+}
+
+// ─── Date range filter tests ──────────────────────────────────────────────────
+
+func mkCatAt(id, name string, typ category.CategoryType, ts time.Time) category.Category {
+	return category.Category{
+		ID: id, Name: name, Type: typ,
+		CanBeDeleted: true, CreatedAt: ts, UpdatedAt: ts,
+	}
+}
+
+func TestCategoryRepo_ListWithStartDate(t *testing.T) {
+	db := newTestDB(t)
+	repo := category.NewSQLiteCategoryRepository(db)
+	ctx := context.Background()
+
+	past := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	repo.Create(ctx, mkCatAt("cat-old", "Antiga", category.Expense, past))
+	repo.Create(ctx, mkCatAt("cat-new", "Nova", category.Expense, recent))
+
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	p := shared.Pagination{Page: 1, Limit: 10, OrderBy: "name", Order: "ASC", StartDate: &cutoff}
+	cats, total, err := repo.List(ctx, category.CategoryFilter{}, p)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("total: got %d, want 1", total)
+	}
+	if len(cats) != 1 || cats[0].ID != "cat-new" {
+		t.Errorf("expected only cat-new, got %+v", cats)
+	}
+}
+
+func TestCategoryRepo_ListWithEndDate(t *testing.T) {
+	db := newTestDB(t)
+	repo := category.NewSQLiteCategoryRepository(db)
+	ctx := context.Background()
+
+	past := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	repo.Create(ctx, mkCatAt("cat-old", "Antiga", category.Expense, past))
+	repo.Create(ctx, mkCatAt("cat-new", "Nova", category.Expense, recent))
+
+	cutoff := time.Date(2024, 12, 31, 23, 59, 59, 0, time.UTC)
+	p := shared.Pagination{Page: 1, Limit: 10, OrderBy: "name", Order: "ASC", EndDate: &cutoff}
+	cats, total, err := repo.List(ctx, category.CategoryFilter{}, p)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("total: got %d, want 1", total)
+	}
+	if len(cats) != 1 || cats[0].ID != "cat-old" {
+		t.Errorf("expected only cat-old, got %+v", cats)
 	}
 }

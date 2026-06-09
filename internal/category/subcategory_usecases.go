@@ -46,6 +46,11 @@ func NewListSubcategoriesByType(repo SubcategoryRepository) ListSubcategoriesByT
 }
 
 func (uc *listSubcategoriesByTypeImpl) Execute(ctx context.Context, t CategoryType) ([]Subcategory, error) {
+	if _, ok := validTypes[t]; !ok {
+		return nil, domainerr.NewBadRequest(
+			"tipo inválido: use despesa, receita ou transferencia",
+			domainerr.WithDisplayable())
+	}
 	subs, err := uc.repo.ListAllByType(ctx, t)
 	if err != nil {
 		return nil, domainerr.NewInternal("erro ao listar subcategorias por tipo")

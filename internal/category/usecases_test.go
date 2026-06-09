@@ -208,7 +208,7 @@ func TestUpdateCategory_Success(t *testing.T) {
 
 	uc := NewUpdateCategory(repo)
 	updated, err := uc.Execute(context.Background(), UpdateCategoryInput{
-		ID: "cat-1", Name: "Novo Nome", Icon: "icon.svg", Color: "#FFF",
+		ID: "cat-1", Name: "Novo Nome", Icon: "icon.svg", Color: "#FFFFFF",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -371,5 +371,121 @@ func TestListSubcategories_CategoryNotFound(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for missing category")
+	}
+}
+
+func TestListSubcategories_Success(t *testing.T) {
+	catRepo := newFakeCatRepo()
+	catRepo.data["cat-1"] = Category{ID: "cat-1", Name: "Moradia", Type: Expense, CanBeDeleted: true}
+	subRepo := newFakeSubRepo()
+	subRepo.data["s1"] = Subcategory{ID: "s1", CategoryID: "cat-1", Name: "Aluguel"}
+	subRepo.data["s2"] = Subcategory{ID: "s2", CategoryID: "cat-1", Name: "Água"}
+
+	uc := NewListSubcategories(catRepo, subRepo)
+	result, err := uc.Execute(context.Background(), ListSubcategoriesInput{
+		CategoryID: "cat-1",
+		Pagination: shared.DefaultPagination(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Pagination.Total != 2 {
+		t.Errorf("total: got %d, want 2", result.Pagination.Total)
+	}
+}
+
+func TestGetCategory_Success(t *testing.T) {
+	repo := newFakeCatRepo()
+	repo.data["cat-1"] = Category{ID: "cat-1", Name: "Moradia", Type: Expense, CanBeDeleted: true}
+
+	uc := NewGetCategory(repo)
+	got, err := uc.Execute(context.Background(), "cat-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ID != "cat-1" {
+		t.Errorf("id: got %q, want cat-1", got.ID)
+	}
+}
+
+func TestGetCategory_NotFound(t *testing.T) {
+	uc := NewGetCategory(newFakeCatRepo())
+	_, err := uc.Execute(context.Background(), "missing")
+	if err == nil {
+		t.Error("expected not-found error")
+	}
+}
+
+func TestGetSubcategory_Success(t *testing.T) {
+	repo := newFakeSubRepo()
+	repo.data["sub-1"] = Subcategory{ID: "sub-1", CategoryID: "cat-1", Name: "Aluguel"}
+
+	uc := NewGetSubcategory(repo)
+	got, err := uc.Execute(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ID != "sub-1" {
+		t.Errorf("id: got %q, want sub-1", got.ID)
+	}
+}
+
+func TestGetSubcategory_NotFound(t *testing.T) {
+	uc := NewGetSubcategory(newFakeSubRepo())
+	_, err := uc.Execute(context.Background(), "missing")
+	if err == nil {
+		t.Error("expected not-found error")
+	}
+}
+
+func TestUpdateSubcategory_Success(t *testing.T) {
+	repo := newFakeSubRepo()
+	repo.data["sub-1"] = Subcategory{ID: "sub-1", CategoryID: "cat-1", Name: "Antigo", CanBeDeleted: true}
+
+	uc := NewUpdateSubcategory(repo)
+	updated, err := uc.Execute(context.Background(), UpdateSubcategoryInput{
+		ID: "sub-1", Name: "Novo Nome", Icon: "icon.svg", Color: "#FF0000",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated.Name != "Novo Nome" {
+		t.Errorf("name: got %q, want Novo Nome", updated.Name)
+	}
+}
+
+func TestUpdateSubcategory_NotFound(t *testing.T) {
+	uc := NewUpdateSubcategory(newFakeSubRepo())
+	_, err := uc.Execute(context.Background(), UpdateSubcategoryInput{ID: "missing", Name: "x"})
+	if err == nil {
+		t.Error("expected not-found error")
+	}
+}
+
+func TestListSubcategoriesByType_InvalidType(t *testing.T) {
+	uc := NewListSubcategoriesByType(newFakeSubRepo())
+	_, err := uc.Execute(context.Background(), "invalido")
+	if err == nil {
+		t.Error("expected error for invalid type")
+	}
+}
+
+func TestCreateCategory_RepoError(t *testing.T) {
+	repo := newFakeCatRepo()
+	repo.forceErr = ErrCategoryNotFound
+	uc := NewCreateCategory(repo)
+	_, err := uc.Execute(context.Background(), CreateCategoryInput{Name: "Test", Type: Expense})
+	if err == nil {
+		t.Error("expected error when repo fails")
+	}
+}
+
+func TestCreateSubcategory_ValidationError(t *testing.T) {
+	uc := NewCreateSubcategory(newFakeCatRepo(), newFakeSubRepo())
+	_, err := uc.Execute(context.Background(), CreateSubcategoryInput{
+		CategoryID: "", Name: "",
+	})
+	if err == nil {
+		t.Error("expected validation error")
 	}
 }

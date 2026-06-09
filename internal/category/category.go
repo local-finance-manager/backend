@@ -1,6 +1,7 @@
 package category
 
 import (
+	"regexp"
 	"strings"
 	"time"
 
@@ -96,8 +97,8 @@ type UpdateSubcategoryInput struct {
 // ─── Domain errors ────────────────────────────────────────────────────────────
 
 var (
-	ErrCategoryNotFound    = domainerr.NewNotFound("categoria não encontrada")
-	ErrSubcategoryNotFound = domainerr.NewNotFound("subcategoria não encontrada")
+	ErrCategoryNotFound    = domainerr.NewNotFound("categoria não encontrada", domainerr.WithDisplayable())
+	ErrSubcategoryNotFound = domainerr.NewNotFound("subcategoria não encontrada", domainerr.WithDisplayable())
 	ErrCategoryHasSubs     = domainerr.NewConflict(
 		"não é possível excluir categoria com subcategorias cadastradas",
 		domainerr.WithDisplayable())
@@ -119,14 +120,24 @@ var (
 //   - *domainerr.BadRequestErr  → exactly one rule failed  (HTTP 400)
 //   - *domainerr.CompositeErr   → two or more rules failed (HTTP 400, errors:[…])
 
+const (
+	maxNameLen = 100
+	maxIconLen = 100
+)
+
+// colorRegex validates the optional #RRGGBB hex color format.
+var colorRegex = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+
 // ValidateCreateCategory validates creation input at the domain boundary.
 func ValidateCreateCategory(in CreateCategoryInput) error {
 	name := strings.TrimSpace(in.Name)
 	_, typeOK := validTypes[in.Type]
 	return validation.NewAccumulator().
 		Check(name != "", "nome é obrigatório").
-		Check(len([]rune(name)) <= 100, "nome deve ter no máximo 100 caracteres").
+		Check(len([]rune(name)) <= maxNameLen, "nome deve ter no máximo 100 caracteres").
 		Check(typeOK, "tipo inválido: use despesa, receita ou transferencia").
+		Check(len(in.Icon) <= maxIconLen, "ícone deve ter no máximo 100 caracteres").
+		Check(in.Color == "" || colorRegex.MatchString(in.Color), "cor deve estar no formato #RRGGBB").
 		Result()
 }
 
@@ -135,7 +146,9 @@ func ValidateUpdateCategory(in UpdateCategoryInput) error {
 	name := strings.TrimSpace(in.Name)
 	return validation.NewAccumulator().
 		Check(name != "", "nome é obrigatório").
-		Check(len([]rune(name)) <= 100, "nome deve ter no máximo 100 caracteres").
+		Check(len([]rune(name)) <= maxNameLen, "nome deve ter no máximo 100 caracteres").
+		Check(len(in.Icon) <= maxIconLen, "ícone deve ter no máximo 100 caracteres").
+		Check(in.Color == "" || colorRegex.MatchString(in.Color), "cor deve estar no formato #RRGGBB").
 		Result()
 }
 
@@ -145,7 +158,9 @@ func ValidateCreateSubcategory(in CreateSubcategoryInput) error {
 	return validation.NewAccumulator().
 		Check(strings.TrimSpace(in.CategoryID) != "", "category_id é obrigatório").
 		Check(name != "", "nome é obrigatório").
-		Check(len([]rune(name)) <= 100, "nome deve ter no máximo 100 caracteres").
+		Check(len([]rune(name)) <= maxNameLen, "nome deve ter no máximo 100 caracteres").
+		Check(len(in.Icon) <= maxIconLen, "ícone deve ter no máximo 100 caracteres").
+		Check(in.Color == "" || colorRegex.MatchString(in.Color), "cor deve estar no formato #RRGGBB").
 		Result()
 }
 
@@ -154,6 +169,8 @@ func ValidateUpdateSubcategory(in UpdateSubcategoryInput) error {
 	name := strings.TrimSpace(in.Name)
 	return validation.NewAccumulator().
 		Check(name != "", "nome é obrigatório").
-		Check(len([]rune(name)) <= 100, "nome deve ter no máximo 100 caracteres").
+		Check(len([]rune(name)) <= maxNameLen, "nome deve ter no máximo 100 caracteres").
+		Check(len(in.Icon) <= maxIconLen, "ícone deve ter no máximo 100 caracteres").
+		Check(in.Color == "" || colorRegex.MatchString(in.Color), "cor deve estar no formato #RRGGBB").
 		Result()
 }

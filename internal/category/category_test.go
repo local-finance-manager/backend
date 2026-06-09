@@ -61,6 +61,43 @@ func TestValidateCreateCategory(t *testing.T) {
 			in:      CreateCategoryInput{Name: "Test", Type: ""},
 			wantErr: true,
 		},
+		// ─── Color validation ─────────────────────────────────────────────
+		{
+			name:    "valid hex color",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Color: "#A1B2C3"},
+			wantErr: false,
+		},
+		{
+			name:    "lowercase hex color",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Color: "#a1b2c3"},
+			wantErr: false,
+		},
+		{
+			name:    "empty color is optional",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Color: ""},
+			wantErr: false,
+		},
+		{
+			name:    "invalid color format",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Color: "red"},
+			wantErr: true,
+		},
+		{
+			name:    "color without hash",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Color: "A1B2C3"},
+			wantErr: true,
+		},
+		// ─── Icon validation ──────────────────────────────────────────────
+		{
+			name:    "icon at max length",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Icon: strings.Repeat("i", 100)},
+			wantErr: false,
+		},
+		{
+			name:    "icon too long",
+			in:      CreateCategoryInput{Name: "Test", Type: Expense, Icon: strings.Repeat("i", 101)},
+			wantErr: true,
+		},
 		// ─── Multi-error accumulation ──────────────────────────────────────
 		{
 			name:         "empty name AND invalid type → two errors accumulated",
@@ -71,6 +108,12 @@ func TestValidateCreateCategory(t *testing.T) {
 		{
 			name:         "name too long AND invalid type → two errors accumulated",
 			in:           CreateCategoryInput{Name: strings.Repeat("x", 101), Type: ""},
+			wantErr:      true,
+			wantMsgCount: 2,
+		},
+		{
+			name:         "invalid color AND invalid type → two errors accumulated",
+			in:           CreateCategoryInput{Name: "Test", Type: "invalido", Color: "not-a-color"},
 			wantErr:      true,
 			wantMsgCount: 2,
 		},
@@ -129,6 +172,21 @@ func TestValidateUpdateCategory(t *testing.T) {
 			in:      UpdateCategoryInput{ID: "cat-1", Name: strings.Repeat("x", 101)},
 			wantErr: true,
 		},
+		{
+			name:    "valid color",
+			in:      UpdateCategoryInput{ID: "cat-1", Name: "Nome", Color: "#FF0000"},
+			wantErr: false,
+		},
+		{
+			name:    "invalid color",
+			in:      UpdateCategoryInput{ID: "cat-1", Name: "Nome", Color: "#ZZZ"},
+			wantErr: true,
+		},
+		{
+			name:    "icon too long",
+			in:      UpdateCategoryInput{ID: "cat-1", Name: "Nome", Icon: strings.Repeat("i", 101)},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -172,6 +230,21 @@ func TestValidateCreateSubcategory(t *testing.T) {
 			in:      CreateSubcategoryInput{CategoryID: "cat-1", Name: strings.Repeat("n", 101)},
 			wantErr: true,
 		},
+		{
+			name:    "valid color",
+			in:      CreateSubcategoryInput{CategoryID: "cat-1", Name: "Sub", Color: "#FF0000"},
+			wantErr: false,
+		},
+		{
+			name:    "invalid color",
+			in:      CreateSubcategoryInput{CategoryID: "cat-1", Name: "Sub", Color: "blue"},
+			wantErr: true,
+		},
+		{
+			name:    "icon too long",
+			in:      CreateSubcategoryInput{CategoryID: "cat-1", Name: "Sub", Icon: strings.Repeat("i", 101)},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -208,6 +281,21 @@ func TestValidateUpdateSubcategory(t *testing.T) {
 		{
 			name:    "name too long",
 			in:      UpdateSubcategoryInput{ID: "sub-1", Name: strings.Repeat("y", 101)},
+			wantErr: true,
+		},
+		{
+			name:    "valid color",
+			in:      UpdateSubcategoryInput{ID: "sub-1", Name: "Sub", Color: "#1A2B3C"},
+			wantErr: false,
+		},
+		{
+			name:    "invalid color",
+			in:      UpdateSubcategoryInput{ID: "sub-1", Name: "Sub", Color: "#GGG"},
+			wantErr: true,
+		},
+		{
+			name:    "icon too long",
+			in:      UpdateSubcategoryInput{ID: "sub-1", Name: "Sub", Icon: strings.Repeat("i", 101)},
 			wantErr: true,
 		},
 	}
