@@ -5,6 +5,7 @@ server
 # Config (contains secrets)
 *.toml
 *.env
+.env
 
 # Token OAuth2
 *.json
@@ -22,5 +23,5 @@ server
 # OS
 .DS_Store
 
-# Air (hot reload)
 tmp/
+temp/

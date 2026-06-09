@@ -4,47 +4,55 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
-	"github.com/BurntSushi/toml"
+	"github.com/joho/godotenv"
 )
 
+// Config holds all runtime configuration for the application.
 type Config struct {
-	Server   ServerConfig   `toml:"server"`
-	Database DatabaseConfig `toml:"database"`
+	Server   ServerConfig
+	Database DatabaseConfig
 }
 
+// ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Port int `toml:"port"`
+	Port int
 }
 
+// DatabaseConfig holds SQLite database settings.
 type DatabaseConfig struct {
-	Path string `toml:"path"`
+	// Path is the absolute path to the SQLite file on disk.
+	Path string
 }
 
+// Addr returns the TCP address the server should listen on.
 func (c *Config) Addr() string {
 	return fmt.Sprintf(":%d", c.Server.Port)
 }
 
+// Load reads configuration from environment variables, falling back to
+// defaults. A .env file in the working directory is loaded if present.
 func Load() (*Config, error) {
-	path, err := filePath()
-	if err != nil {
-		return nil, err
-	}
+	// Ignore error: .env is optional; real env vars take precedence anyway.
+	_ = godotenv.Load()
 
 	cfg := defaults()
 
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return nil, fmt.Errorf("config: create dir: %w", err)
+	if raw := os.Getenv("SERVER_PORT"); raw != "" {
+		p, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("config: SERVER_PORT must be an integer: %w", err)
 		}
-		if err := writeDefaults(path, cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
+		cfg.Server.Port = p
 	}
 
-	if _, err := toml.DecodeFile(path, cfg); err != nil {
-		return nil, fmt.Errorf("config: decode %s: %w", path, err)
+	if path := os.Getenv("DB_PATH"); path != "" {
+		cfg.Database.Path = path
+	}
+
+	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o700); err != nil {
+		return nil, fmt.Errorf("config: create database directory: %w", err)
 	}
 
 	return cfg, nil
@@ -58,21 +66,4 @@ func defaults() *Config {
 			Path: filepath.Join(home, ".local", "share", "financas", "financas.sqlite"),
 		},
 	}
-}
-
-func filePath() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("config: get config dir: %w", err)
-	}
-	return filepath.Join(dir, "financas", "config.toml"), nil
-}
-
-func writeDefaults(path string, cfg *Config) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("config: write defaults: %w", err)
-	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
 }

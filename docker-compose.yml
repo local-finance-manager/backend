@@ -21,7 +21,7 @@ services:
 
   web:
     build:
-      context: ../financas-front
+      context: ../frontend
       dockerfile: Dockerfile
     ports:
       - "19741:80"
