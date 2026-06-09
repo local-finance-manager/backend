@@ -1,0 +1,51 @@
+run:
+  timeout: 5m
+
+linters:
+  enable-all: false
+  enable:
+    - errcheck       # todo erro retornado deve ser verificado
+    - staticcheck    # análise estática ampla (inclui gosimple, unused, etc.)
+    - gosec          # verificações de segurança (SQL injection, paths, etc.)
+    - revive         # estilo e boas práticas Go (substitui golint)
+    - goimports      # ordenação e agrupamento correto de imports
+    - misspell       # erros de ortografia em comentários e strings
+    - ineffassign    # atribuições cujo resultado nunca é lido
+
+linters-settings:
+  goimports:
+    # imports internos do projeto são agrupados separadamente dos externos
+    local-prefixes: github.com/local-finance-manager/backend
+
+  gosec:
+    excludes:
+      # G304: leitura de arquivo a partir de variável — intencional no migration runner
+      - G304
+
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+      - name: var-naming
+        disabled: false
+      - name: unused-parameter
+        disabled: false
+
+  staticcheck:
+    checks: ["all"]
+
+issues:
+  # manter os defaults do golangci-lint para não suprimir problemas reais
+  exclude-use-default: false
+
+  exclude-rules:
+    # testes têm padrões diferentes: erros ignorados intencionalmente, gosec relaxado
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+
+    # main.go faz wiring; alguns erros de defer são intencionais
+    - path: cmd/server/main\.go
+      linters:
+        - errcheck
