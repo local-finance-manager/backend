@@ -108,6 +108,9 @@ var (
 	ErrSubcategoryNotDeletable = domainerr.NewConflict(
 		"esta subcategoria do sistema não pode ser excluída",
 		domainerr.WithDisplayable())
+	ErrSubcategoryHasTransactions = domainerr.NewConflict(
+		"não é possível excluir: existem lançamentos vinculados a esta subcategoria",
+		domainerr.WithDisplayable())
 )
 
 // ─── Validation ───────────────────────────────────────────────────────────────

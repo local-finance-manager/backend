@@ -298,12 +298,19 @@ func (r *SQLiteSubcategoryRepository) Update(ctx context.Context, s Subcategory)
 func (r *SQLiteSubcategoryRepository) Delete(ctx context.Context, id string) error {
 	res, err := r.db.ExecContext(ctx, "DELETE FROM subcategories WHERE id = ?", id)
 	if err != nil {
+		if isForeignKeyConstraintError(err) {
+			return ErrSubcategoryHasTransactions
+		}
 		return fmt.Errorf("subcategory repo: delete: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrSubcategoryNotFound
 	}
 	return nil
+}
+
+func isForeignKeyConstraintError(err error) bool {
+	return strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }
 
 // ─── Scan helpers ─────────────────────────────────────────────────────────────
