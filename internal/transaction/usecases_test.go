@@ -11,12 +11,12 @@ import (
 // ─── Compile-time interface checks ────────────────────────────────────────────
 
 var (
-	_ GetTransactionUseCase    = (*getTransactionImpl)(nil)
-	_ ListTransactionsUseCase  = (*listTransactionsImpl)(nil)
-	_ CreateTransactionUseCase = (*createTransactionImpl)(nil)
-	_ UpdateTransactionUseCase = (*updateTransactionImpl)(nil)
+	_ GetTransactionUseCase     = (*getTransactionImpl)(nil)
+	_ ListTransactionsUseCase   = (*listTransactionsImpl)(nil)
+	_ CreateTransactionUseCase  = (*createTransactionImpl)(nil)
+	_ UpdateTransactionUseCase  = (*updateTransactionImpl)(nil)
 	_ ConfirmTransactionUseCase = (*confirmTransactionImpl)(nil)
-	_ DeleteTransactionUseCase = (*deleteTransactionImpl)(nil)
+	_ DeleteTransactionUseCase  = (*deleteTransactionImpl)(nil)
 )
 
 // ─── Fake repository ──────────────────────────────────────────────────────────
@@ -107,6 +107,14 @@ func (f *fakeSubFacade) GetSubcategoryType(_ context.Context, _ string) (string,
 	return f.typ, nil
 }
 
+// fakeCardChecker é o stub do CreditCardChecker injetado em create/update.
+type fakeCardChecker struct{ err error }
+
+func (f *fakeCardChecker) CheckLinkable(_ context.Context, _ string) error { return f.err }
+
+// okChecker é um CreditCardChecker que sempre aprova o vínculo.
+func okChecker() CreditCardChecker { return &fakeCardChecker{} }
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func seedDetail(repo *fakeTransactionRepo, id string, status TransactionStatus) {
@@ -188,7 +196,7 @@ func TestListTransactions_RepoError(t *testing.T) {
 func TestCreateTransaction_Success(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewCreateTransaction(repo, facade)
+	uc := NewCreateTransaction(repo, facade, okChecker())
 
 	got, err := uc.Execute(context.Background(), CreateTransactionInput{
 		Title:          "Aluguel",
@@ -212,7 +220,7 @@ func TestCreateTransaction_Success(t *testing.T) {
 func TestCreateTransaction_ValidationError(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewCreateTransaction(repo, facade)
+	uc := NewCreateTransaction(repo, facade, okChecker())
 
 	_, err := uc.Execute(context.Background(), CreateTransactionInput{
 		Title: "", Amount: 0, SubcategoryID: "sub-1",
@@ -226,7 +234,7 @@ func TestCreateTransaction_ValidationError(t *testing.T) {
 func TestCreateTransaction_SubcategoryNotFound(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{notFound: true}
-	uc := NewCreateTransaction(repo, facade)
+	uc := NewCreateTransaction(repo, facade, okChecker())
 
 	_, err := uc.Execute(context.Background(), CreateTransactionInput{
 		Title:          "Aluguel",
@@ -241,13 +249,34 @@ func TestCreateTransaction_SubcategoryNotFound(t *testing.T) {
 	}
 }
 
+func TestCreateTransaction_CardCheckerError(t *testing.T) {
+	repo := newFakeRepo()
+	facade := &fakeSubFacade{typ: "despesa"}
+	checker := &fakeCardChecker{err: errors.New("cartão arquivado")}
+	uc := NewCreateTransaction(repo, facade, checker)
+
+	cardID := "card-1"
+	_, err := uc.Execute(context.Background(), CreateTransactionInput{
+		Title:          "Compra",
+		Amount:         100,
+		SubcategoryID:  "sub-1",
+		PaymentMethod:  MethodCartaoCredito,
+		Status:         StatusPendente,
+		CompetenceDate: "2026-01-01",
+		CreditCardID:   &cardID,
+	})
+	if err == nil {
+		t.Error("expected error propagated from card checker")
+	}
+}
+
 // ─── UpdateTransaction ────────────────────────────────────────────────────────
 
 func TestUpdateTransaction_Success(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-upd", StatusPendente)
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewUpdateTransaction(repo, facade)
+	uc := NewUpdateTransaction(repo, facade, okChecker())
 
 	got, err := uc.Execute(context.Background(), UpdateTransactionInput{
 		ID:             "txn-upd",
@@ -274,7 +303,7 @@ func TestUpdateTransaction_InvalidTransition(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-can", StatusCancelado)
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewUpdateTransaction(repo, facade)
+	uc := NewUpdateTransaction(repo, facade, okChecker())
 
 	// cancelado → realizado is prohibited
 	pd := "2026-01-10"
@@ -295,7 +324,7 @@ func TestUpdateTransaction_InvalidTransition(t *testing.T) {
 
 func TestUpdateTransaction_NotFound(t *testing.T) {
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewUpdateTransaction(newFakeRepo(), facade)
+	uc := NewUpdateTransaction(newFakeRepo(), facade, okChecker())
 
 	_, err := uc.Execute(context.Background(), UpdateTransactionInput{
 		ID:             "missing",

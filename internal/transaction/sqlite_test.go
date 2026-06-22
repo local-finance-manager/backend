@@ -72,6 +72,7 @@ func newTestDB(t *testing.T) *sql.DB {
 		payment_date            TEXT,
 		account_id              TEXT,
 		destination_account_id  TEXT,
+		credit_card_id          TEXT,
 		created_at              TEXT    NOT NULL,
 		updated_at              TEXT    NOT NULL
 	)`)
@@ -500,5 +501,54 @@ func TestTransactionRepo_GetSummary_Empty(t *testing.T) {
 	if s.TotalDespesas != 0 || s.TotalReceitas != 0 || s.SaldoPeriodo != 0 ||
 		s.TotalPendente != 0 || s.CountTotal != 0 {
 		t.Errorf("expected zero summary, got: %+v", s)
+	}
+}
+
+// TestTransactionRepo_GetSummary_ExcludesCardPurchases prova o D14: compras de cartão
+// NÃO entram no saldo financeiro, mas continuam visíveis na listagem.
+func TestTransactionRepo_GetSummary_ExcludesCardPurchases(t *testing.T) {
+	db := newTestDB(t)
+	insertTestSub(t, db, "cat-exp", "Despesas", "despesa", "sub-exp", "Aluguel")
+	repo := transaction.NewSQLiteRepository(db)
+	ctx := context.Background()
+
+	// despesa normal (sem cartão) → conta no saldo
+	repo.Create(ctx, mkTransaction("normal", "Aluguel", "sub-exp", 100000,
+		transaction.TypeDespesa, transaction.MethodPix, transaction.StatusRealizado, "2026-01-01", strPtr("2026-01-01")))
+	// compra no cartão → NÃO conta no saldo (D14)
+	card := mkTransaction("card", "Jantar fora", "sub-exp", 50000,
+		transaction.TypeDespesa, transaction.MethodCartaoCredito, transaction.StatusRealizado, "2026-01-02", strPtr("2026-01-02"))
+	cardID := "card-1"
+	card.CreditCardID = &cardID
+	repo.Create(ctx, card)
+
+	s, err := repo.GetSummary(ctx, transaction.TransactionFilter{})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if s.TotalDespesas != 100000 {
+		t.Errorf("TotalDespesas: got %d, want 100000 (compra de cartão deve ser excluída)", s.TotalDespesas)
+	}
+	if s.CountTotal != 1 {
+		t.Errorf("CountTotal: got %d, want 1 (só a despesa normal conta)", s.CountTotal)
+	}
+
+	// mas a compra de cartão continua na listagem
+	p := shared.Pagination{Page: 1, Limit: 10, OrderBy: "competence_date", Order: "ASC"}
+	list, err := repo.List(ctx, transaction.TransactionFilter{}, p)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("List deve mostrar as 2 transações (inclusive a de cartão), got %d", len(list))
+	}
+
+	// e o filtro por cartão funciona
+	got, err := repo.List(ctx, transaction.TransactionFilter{CreditCardID: &cardID}, p)
+	if err != nil {
+		t.Fatalf("list by card: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "card" {
+		t.Errorf("filtro credit_card_id: esperado só 'card', got %v", got)
 	}
 }

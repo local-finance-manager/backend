@@ -168,6 +168,25 @@ func TestValidateCreate(t *testing.T) {
 			wantErr:      true,
 			wantMsgCount: 2,
 		},
+		{
+			name: "creditCardId com paymentMethod != cartao_credito (D8)",
+			modify: func(in *transaction.CreateTransactionInput) {
+				in.PaymentMethod = transaction.MethodPix
+				cardID := "card-1"
+				in.CreditCardID = &cardID
+			},
+			wantErr:       true,
+			wantMsgSubstr: "cartão de crédito só pode ser vinculado",
+		},
+		{
+			name: "válido — creditCardId com cartao_credito",
+			modify: func(in *transaction.CreateTransactionInput) {
+				in.PaymentMethod = transaction.MethodCartaoCredito
+				cardID := "card-1"
+				in.CreditCardID = &cardID
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range cases {
