@@ -63,17 +63,24 @@ func (uc *listTransactionsImpl) Execute(ctx context.Context, in ListTransactions
 // ─── createTransactionImpl ────────────────────────────────────────────────────
 
 type createTransactionImpl struct {
-	repo   TransactionRepository
-	facade SubcategoryFacade
+	repo        TransactionRepository
+	facade      SubcategoryFacade
+	cardChecker CreditCardChecker
 }
 
-func NewCreateTransaction(repo TransactionRepository, facade SubcategoryFacade) CreateTransactionUseCase {
-	return &createTransactionImpl{repo: repo, facade: facade}
+func NewCreateTransaction(repo TransactionRepository, facade SubcategoryFacade, cardChecker CreditCardChecker) CreateTransactionUseCase {
+	return &createTransactionImpl{repo: repo, facade: facade, cardChecker: cardChecker}
 }
 
 func (uc *createTransactionImpl) Execute(ctx context.Context, in CreateTransactionInput) (TransactionDetail, error) {
 	if err := ValidateCreate(in); err != nil {
 		return TransactionDetail{}, err
+	}
+
+	if in.CreditCardID != nil {
+		if err := uc.cardChecker.CheckLinkable(ctx, *in.CreditCardID); err != nil {
+			return TransactionDetail{}, err
+		}
 	}
 
 	typeStr, err := uc.facade.GetSubcategoryType(ctx, in.SubcategoryID)
@@ -95,6 +102,7 @@ func (uc *createTransactionImpl) Execute(ctx context.Context, in CreateTransacti
 		PaymentDate:          in.PaymentDate,
 		AccountID:            in.AccountID,
 		DestinationAccountID: in.DestinationAccountID,
+		CreditCardID:         in.CreditCardID,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}
@@ -108,12 +116,13 @@ func (uc *createTransactionImpl) Execute(ctx context.Context, in CreateTransacti
 // ─── updateTransactionImpl ────────────────────────────────────────────────────
 
 type updateTransactionImpl struct {
-	repo   TransactionRepository
-	facade SubcategoryFacade
+	repo        TransactionRepository
+	facade      SubcategoryFacade
+	cardChecker CreditCardChecker
 }
 
-func NewUpdateTransaction(repo TransactionRepository, facade SubcategoryFacade) UpdateTransactionUseCase {
-	return &updateTransactionImpl{repo: repo, facade: facade}
+func NewUpdateTransaction(repo TransactionRepository, facade SubcategoryFacade, cardChecker CreditCardChecker) UpdateTransactionUseCase {
+	return &updateTransactionImpl{repo: repo, facade: facade, cardChecker: cardChecker}
 }
 
 func (uc *updateTransactionImpl) Execute(ctx context.Context, in UpdateTransactionInput) (TransactionDetail, error) {
@@ -129,6 +138,12 @@ func (uc *updateTransactionImpl) Execute(ctx context.Context, in UpdateTransacti
 	// Status transitions are enforced unless the incoming status equals current.
 	if in.Status != current.Status && !CanTransitionTo(current.Status, in.Status) {
 		return TransactionDetail{}, ErrInvalidTransition(current.Status, in.Status)
+	}
+
+	if in.CreditCardID != nil {
+		if err := uc.cardChecker.CheckLinkable(ctx, *in.CreditCardID); err != nil {
+			return TransactionDetail{}, err
+		}
 	}
 
 	// Type is derived from the subcategory; re-derive only when subcategory changed.
@@ -154,6 +169,7 @@ func (uc *updateTransactionImpl) Execute(ctx context.Context, in UpdateTransacti
 		PaymentDate:          in.PaymentDate,
 		AccountID:            in.AccountID,
 		DestinationAccountID: in.DestinationAccountID,
+		CreditCardID:         in.CreditCardID,
 		CreatedAt:            current.CreatedAt,
 		UpdatedAt:            time.Now().UTC(),
 	}

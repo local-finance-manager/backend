@@ -26,8 +26,8 @@ const createSQL = `
 INSERT INTO transactions (
     id, title, description, amount, type, subcategory_id,
     payment_method, status, competence_date, payment_date,
-    account_id, destination_account_id, created_at, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    account_id, destination_account_id, credit_card_id, created_at, updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 	_, err := r.db.ExecContext(ctx, createSQL,
@@ -37,6 +37,7 @@ func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 		t.CompetenceDate, nullStr(deref(t.PaymentDate)),
 		nullStr(deref(t.AccountID)),
 		nullStr(deref(t.DestinationAccountID)),
+		nullStr(deref(t.CreditCardID)),
 		t.CreatedAt.UTC().Format(time.RFC3339),
 		t.UpdatedAt.UTC().Format(time.RFC3339),
 	)
@@ -51,7 +52,7 @@ func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 const getSQL = `
 SELECT t.id, t.title, t.description, t.amount, t.type, t.subcategory_id,
        t.payment_method, t.status, t.competence_date, t.payment_date,
-       t.account_id, t.destination_account_id, t.created_at, t.updated_at,
+       t.account_id, t.destination_account_id, t.credit_card_id, t.created_at, t.updated_at,
        s.id, s.name, COALESCE(s.icon,''), COALESCE(s.color,''),
        c.id, c.name, COALESCE(c.icon,''), COALESCE(c.color,'')
 FROM transactions t
@@ -77,7 +78,7 @@ const updateSQL = `
 UPDATE transactions SET
     title=?, description=?, amount=?, type=?, subcategory_id=?,
     payment_method=?, status=?, competence_date=?, payment_date=?,
-    account_id=?, destination_account_id=?, updated_at=?
+    account_id=?, destination_account_id=?, credit_card_id=?, updated_at=?
 WHERE id=?`
 
 func (r *SQLiteRepository) Update(ctx context.Context, t Transaction) error {
@@ -88,6 +89,7 @@ func (r *SQLiteRepository) Update(ctx context.Context, t Transaction) error {
 		t.CompetenceDate, nullStr(deref(t.PaymentDate)),
 		nullStr(deref(t.AccountID)),
 		nullStr(deref(t.DestinationAccountID)),
+		nullStr(deref(t.CreditCardID)),
 		t.UpdatedAt.UTC().Format(time.RFC3339),
 		t.ID,
 	)
@@ -165,6 +167,10 @@ func buildFilter(f TransactionFilter) (string, []any) {
 		conds = append(conds, "LOWER(t.title) LIKE ?")
 		args = append(args, "%"+strings.ToLower(*f.Search)+"%")
 	}
+	if f.CreditCardID != nil {
+		conds = append(conds, "t.credit_card_id = ?")
+		args = append(args, *f.CreditCardID)
+	}
 
 	return strings.Join(conds, " AND "), args
 }
@@ -174,7 +180,7 @@ func buildFilter(f TransactionFilter) (string, []any) {
 const listBaseSQL = `
 SELECT t.id, t.title, t.description, t.amount, t.type, t.subcategory_id,
        t.payment_method, t.status, t.competence_date, t.payment_date,
-       t.account_id, t.destination_account_id, t.created_at, t.updated_at,
+       t.account_id, t.destination_account_id, t.credit_card_id, t.created_at, t.updated_at,
        s.id, s.name, COALESCE(s.icon,''), COALESCE(s.color,''),
        c.id, c.name, COALESCE(c.icon,''), COALESCE(c.color,'')
 FROM transactions t
@@ -215,7 +221,10 @@ JOIN categories    c ON c.id = s.category_id`
 
 func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) (Summary, error) {
 	where, args := buildFilter(f)
-	query := fmt.Sprintf("%s WHERE %s GROUP BY t.type, t.status", summaryBaseSQL, where)
+	// D14 (regime de caixa): compras no cartão NÃO entram no saldo financeiro — só o
+	// pagamento da fatura (lançamento normal, sem credit_card_id) conta. A cláusula vai
+	// só aqui, no summary; a List continua mostrando as compras de cartão normalmente.
+	query := fmt.Sprintf("%s WHERE %s AND t.credit_card_id IS NULL GROUP BY t.type, t.status", summaryBaseSQL, where)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -252,13 +261,13 @@ type scanFunc func(dest ...any) error
 
 func scanDetail(scan scanFunc) (TransactionDetail, error) {
 	var d TransactionDetail
-	var desc, payDate, accID, destAccID sql.NullString
+	var desc, payDate, accID, destAccID, creditCardID sql.NullString
 	var createdAt, updatedAt string
 
 	err := scan(
 		&d.ID, &d.Title, &desc, &d.Amount, (*string)(&d.Type), &d.SubcategoryID,
 		(*string)(&d.PaymentMethod), (*string)(&d.Status),
-		&d.CompetenceDate, &payDate, &accID, &destAccID,
+		&d.CompetenceDate, &payDate, &accID, &destAccID, &creditCardID,
 		&createdAt, &updatedAt,
 		&d.Subcategory.ID, &d.Subcategory.Name, &d.Subcategory.Icon, &d.Subcategory.Color,
 		&d.Subcategory.Category.ID, &d.Subcategory.Category.Name,
@@ -279,6 +288,9 @@ func scanDetail(scan scanFunc) (TransactionDetail, error) {
 	}
 	if destAccID.Valid {
 		d.DestinationAccountID = &destAccID.String
+	}
+	if creditCardID.Valid {
+		d.CreditCardID = &creditCardID.String
 	}
 
 	d.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)

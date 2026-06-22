@@ -17,6 +17,7 @@ import (
 
 	"github.com/local-finance-manager/backend/internal/category"
 	"github.com/local-finance-manager/backend/internal/config"
+	"github.com/local-finance-manager/backend/internal/creditcard"
 	"github.com/local-finance-manager/backend/internal/database"
 	"github.com/local-finance-manager/backend/internal/middleware"
 	"github.com/local-finance-manager/backend/internal/transaction"
@@ -68,14 +69,34 @@ func run(log *slog.Logger) error {
 		DeleteSubcategory:       category.NewDeleteSubcategory(subRepo),
 	})
 
+	// Cartão de crédito: repos + facades cross-module.
+	ccRepo := creditcard.NewSQLiteCreditCardRepository(db)
+	ccPayRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	cardChecker := creditcard.NewCreditCardChecker(ccRepo) // transaction valida vínculo via este facade
+	cardReader := transaction.NewCardReader(db)            // creditcard lê lançamentos via este facade
+
 	transactionRepo := transaction.NewSQLiteRepository(db)
 	transactionHandler := transaction.NewHandler(transaction.HandlerDeps{
 		GetTransaction:     transaction.NewGetTransaction(transactionRepo),
 		ListTransactions:   transaction.NewListTransactions(transactionRepo),
-		CreateTransaction:  transaction.NewCreateTransaction(transactionRepo, catFacade),
-		UpdateTransaction:  transaction.NewUpdateTransaction(transactionRepo, catFacade),
+		CreateTransaction:  transaction.NewCreateTransaction(transactionRepo, catFacade, cardChecker),
+		UpdateTransaction:  transaction.NewUpdateTransaction(transactionRepo, catFacade, cardChecker),
 		ConfirmTransaction: transaction.NewConfirmTransaction(transactionRepo),
 		DeleteTransaction:  transaction.NewDeleteTransaction(transactionRepo),
+	})
+
+	creditCardHandler := creditcard.NewHandler(creditcard.HandlerDeps{
+		Create:       creditcard.NewCreateCreditCard(ccRepo),
+		Get:          creditcard.NewGetCreditCard(ccRepo, ccPayRepo, cardReader),
+		List:         creditcard.NewListCreditCards(ccRepo, ccPayRepo, cardReader),
+		Update:       creditcard.NewUpdateCreditCard(ccRepo),
+		Delete:       creditcard.NewDeleteCreditCard(ccRepo, cardReader),
+		Archive:      creditcard.NewArchiveCreditCard(ccRepo),
+		ListInvoices: creditcard.NewListInvoices(ccRepo, ccPayRepo, cardReader),
+		GetInvoice:   creditcard.NewGetInvoice(ccRepo, ccPayRepo, cardReader),
+		PayInvoice:   creditcard.NewPayInvoice(ccRepo, ccPayRepo, cardReader),
+		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, ccPayRepo, cardReader),
+		MonthSummary: creditcard.NewMonthlyCardSummary(ccRepo, cardReader),
 	})
 
 	r := chi.NewRouter()
@@ -99,6 +120,7 @@ func run(log *slog.Logger) error {
 	r.Route("/api/categories", category.Routes(categoryHandler))
 	r.Route("/api/subcategories", category.SubcategoryRoutes(categoryHandler))
 	r.Route("/api/transactions", transaction.Routes(transactionHandler))
+	r.Route("/api/credit-cards", creditcard.Routes(creditCardHandler))
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		domainerr.WriteError(w, domainerr.NewNotFound("route not found"))

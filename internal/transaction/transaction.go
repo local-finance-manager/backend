@@ -77,6 +77,7 @@ type Transaction struct {
 	PaymentDate          *string // YYYY-MM-DD; required when status=realizado
 	AccountID            *string // nullable v1
 	DestinationAccountID *string // nullable v1
+	CreditCardID         *string // nullable; só quando paymentMethod=cartao_credito
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
@@ -133,6 +134,7 @@ type TransactionFilter struct {
 	PaymentDateFrom    *string // YYYY-MM-DD inclusive
 	PaymentDateTo      *string // YYYY-MM-DD inclusive
 	Search             *string // LOWER(title) LIKE '%search%'
+	CreditCardID       *string // filtra lançamentos vinculados a um cartão
 }
 
 // ─── Inputs de listagem ───────────────────────────────────────────────────────
@@ -165,6 +167,7 @@ type CreateTransactionInput struct {
 	PaymentDate          *string // YYYY-MM-DD; required when status=realizado
 	AccountID            *string
 	DestinationAccountID *string
+	CreditCardID         *string
 }
 
 // UpdateTransactionInput carries all mutable fields for a PUT full-replace.
@@ -180,6 +183,7 @@ type UpdateTransactionInput struct {
 	PaymentDate          *string
 	AccountID            *string
 	DestinationAccountID *string
+	CreditCardID         *string
 }
 
 // ConfirmTransactionInput is the minimal body for PATCH .../confirm.
@@ -233,7 +237,9 @@ func ValidateCreate(in CreateTransactionInput) error {
 		Check(pmOK, "forma de pagamento inválida").
 		Check(stOK, "status inválido: use pendente, realizado ou cancelado").
 		Check(in.SubcategoryID != "", "subcategoryId é obrigatório").
-		Check(in.CompetenceDate != "", "data de competência é obrigatória")
+		Check(in.CompetenceDate != "", "data de competência é obrigatória").
+		Check(in.CreditCardID == nil || in.PaymentMethod == MethodCartaoCredito,
+			"cartão de crédito só pode ser vinculado a lançamentos com forma de pagamento cartão de crédito")
 
 	if in.CompetenceDate != "" {
 		acc.Check(isValidDate(in.CompetenceDate), "data de competência inválida: use YYYY-MM-DD")
@@ -272,7 +278,9 @@ func ValidateUpdate(in UpdateTransactionInput) error {
 		Check(pmOK, "forma de pagamento inválida").
 		Check(stOK, "status inválido: use pendente, realizado ou cancelado").
 		Check(in.SubcategoryID != "", "subcategoryId é obrigatório").
-		Check(in.CompetenceDate != "", "data de competência é obrigatória")
+		Check(in.CompetenceDate != "", "data de competência é obrigatória").
+		Check(in.CreditCardID == nil || in.PaymentMethod == MethodCartaoCredito,
+			"cartão de crédito só pode ser vinculado a lançamentos com forma de pagamento cartão de crédito")
 
 	if in.CompetenceDate != "" {
 		acc.Check(isValidDate(in.CompetenceDate), "data de competência inválida: use YYYY-MM-DD")

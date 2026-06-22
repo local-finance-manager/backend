@@ -24,3 +24,13 @@ type TransactionRepository interface {
 type SubcategoryFacade interface {
 	GetSubcategoryType(ctx context.Context, subcategoryID string) (string, error)
 }
+
+// CreditCardChecker valida que um cartão pode receber vínculo de lançamento.
+// Interface definida no consumidor (transaction); implementada por um facade do
+// módulo creditcard e injetada no main.go. Retorna apenas error (domainerr),
+// sem acoplamento de tipo entre os módulos.
+type CreditCardChecker interface {
+	// CheckLinkable retorna nil se o cartão existe e está ativo; erro de domínio
+	// (não encontrado / arquivado) caso contrário.
+	CheckLinkable(ctx context.Context, cardID string) error
+}

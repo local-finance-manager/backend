@@ -29,12 +29,12 @@ var transactionAllowedOrderBy = []string{
 
 // HandlerDeps holds all use case dependencies for the transaction handler.
 type HandlerDeps struct {
-	GetTransaction    GetTransactionUseCase
-	ListTransactions  ListTransactionsUseCase
-	CreateTransaction CreateTransactionUseCase
-	UpdateTransaction UpdateTransactionUseCase
+	GetTransaction     GetTransactionUseCase
+	ListTransactions   ListTransactionsUseCase
+	CreateTransaction  CreateTransactionUseCase
+	UpdateTransaction  UpdateTransactionUseCase
 	ConfirmTransaction ConfirmTransactionUseCase
-	DeleteTransaction DeleteTransactionUseCase
+	DeleteTransaction  DeleteTransactionUseCase
 }
 
 // Handler handles HTTP requests for the transaction module.
@@ -74,6 +74,7 @@ type transactionDetailResp struct {
 	PaymentDate          *string             `json:"payment_date"`
 	AccountID            *string             `json:"account_id"`
 	DestinationAccountID *string             `json:"destination_account_id"`
+	CreditCardID         *string             `json:"credit_card_id"`
 	CreatedAt            string              `json:"created_at"`
 	UpdatedAt            string              `json:"updated_at"`
 	Subcategory          subcategoryInfoResp `json:"subcategory"`
@@ -98,6 +99,7 @@ type createTransactionReq struct {
 	PaymentDate          *string `json:"payment_date"`
 	AccountID            *string `json:"account_id"`
 	DestinationAccountID *string `json:"destination_account_id"`
+	CreditCardID         *string `json:"credit_card_id"`
 }
 
 type updateTransactionReq struct {
@@ -111,6 +113,7 @@ type updateTransactionReq struct {
 	PaymentDate          *string `json:"payment_date"`
 	AccountID            *string `json:"account_id"`
 	DestinationAccountID *string `json:"destination_account_id"`
+	CreditCardID         *string `json:"credit_card_id"`
 }
 
 type confirmTransactionReq struct {
@@ -132,6 +135,7 @@ func toDetailResp(d TransactionDetail) transactionDetailResp {
 		PaymentDate:          d.PaymentDate,
 		AccountID:            d.AccountID,
 		DestinationAccountID: d.DestinationAccountID,
+		CreditCardID:         d.CreditCardID,
 		CreatedAt:            d.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:            d.UpdatedAt.UTC().Format(time.RFC3339),
 		Subcategory: subcategoryInfoResp{
@@ -192,6 +196,9 @@ func parseTransactionFilter(r *http.Request) TransactionFilter {
 	}
 	if v := q.Get("search"); v != "" {
 		f.Search = &v
+	}
+	if v := q.Get("credit_card_id"); v != "" {
+		f.CreditCardID = &v
 	}
 
 	return f
@@ -256,6 +263,7 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 		PaymentDate:          req.PaymentDate,
 		AccountID:            req.AccountID,
 		DestinationAccountID: req.DestinationAccountID,
+		CreditCardID:         req.CreditCardID,
 	}
 
 	d, err := h.deps.CreateTransaction.Execute(r.Context(), in)
@@ -289,6 +297,7 @@ func (h *Handler) UpdateTransaction(w http.ResponseWriter, r *http.Request) {
 		PaymentDate:          req.PaymentDate,
 		AccountID:            req.AccountID,
 		DestinationAccountID: req.DestinationAccountID,
+		CreditCardID:         req.CreditCardID,
 	}
 
 	d, err := h.deps.UpdateTransaction.Execute(r.Context(), in)
