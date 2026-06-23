@@ -7,10 +7,14 @@ services:
       dockerfile: Dockerfile
     ports:
       - "19742:19742"
+    # A imagem scratch não copia o .env; injetamos as DRIVE_*/BACKUP_* no container
+    # via env_file (RNF-BKP-09). O .env é criptografado com git-crypt no repo.
+    env_file:
+      - .env
     volumes:
-      # Config (client_id, client_secret) e token OAuth2
+      # token.json do OAuth2 (gerado por ./server -authorize) — D17
       - ${HOME}/.config/financas:/root/.config/financas
-      # Banco de dados SQLite
+      # Banco de dados SQLite + sidecar de backup
       - ${HOME}/.local/share/financas:/root/.local/share/financas
     restart: unless-stopped
     healthcheck:

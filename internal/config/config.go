@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
+	Backup   BackupConfig
 }
 
 // ServerConfig holds HTTP server settings.
@@ -24,6 +25,20 @@ type ServerConfig struct {
 type DatabaseConfig struct {
 	// Path is the absolute path to the SQLite file on disk.
 	Path string
+}
+
+// BackupConfig holds Google Drive backup settings. Secrets must never be logged.
+type BackupConfig struct {
+	Enabled          bool
+	ClientID         string
+	ClientSecret     string
+	RefreshToken     string // fallback; preferimos o token.json (TokenPath)
+	FolderName       string
+	LatestFilename   string
+	Retention        int
+	AutosaveInterval int    // minutos; 0 = desabilitado
+	DataDir          string // dir do banco — sidecar, snapshots, safety backups
+	TokenPath        string // ~/.config/financas/token.json (volume montado)
 }
 
 // Addr returns the TCP address the server should listen on.
@@ -55,7 +70,48 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: create database directory: %w", err)
 	}
 
+	loadBackup(&cfg.Backup, cfg.Database.Path)
+
 	return cfg, nil
+}
+
+// loadBackup reads DRIVE_*/BACKUP_* env vars into the BackupConfig.
+// Never returns an error: missing/invalid config just leaves the feature disabled.
+func loadBackup(b *BackupConfig, dbPath string) {
+	b.Enabled = os.Getenv("DRIVE_SYNC_ENABLED") == "true"
+	b.ClientID = os.Getenv("DRIVE_CLIENT_ID")
+	b.ClientSecret = os.Getenv("DRIVE_CLIENT_SECRET")
+	b.RefreshToken = os.Getenv("DRIVE_REFRESH_TOKEN")
+	b.FolderName = getenvDefault("DRIVE_FOLDER_NAME", "Financas")
+	b.LatestFilename = getenvDefault("DRIVE_LATEST_FILENAME", "financas-latest.sqlite")
+	b.Retention = atoiDefault(os.Getenv("DRIVE_BACKUP_RETENTION"), 30)
+	b.AutosaveInterval = atoiDefault(os.Getenv("BACKUP_AUTOSAVE_INTERVAL"), 0)
+	b.DataDir = filepath.Dir(dbPath)
+
+	if path := os.Getenv("DRIVE_TOKEN_PATH"); path != "" {
+		b.TokenPath = path
+	} else {
+		home, _ := os.UserHomeDir()
+		b.TokenPath = filepath.Join(home, ".config", "financas", "token.json")
+	}
+}
+
+func getenvDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func atoiDefault(raw string, def int) int {
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func defaults() *Config {
