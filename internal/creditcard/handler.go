@@ -102,18 +102,21 @@ type invoiceResp struct {
 }
 
 type cardTxnResp struct {
-	ID              string  `json:"id"`
-	Title           string  `json:"title"`
-	Amount          int64   `json:"amount"`
-	CompetenceDate  string  `json:"competence_date"`
-	PaymentDate     *string `json:"payment_date"`
-	Status          string  `json:"status"`
-	SubcategoryID   string  `json:"subcategory_id"`
-	SubcategoryName string  `json:"subcategory_name"`
-	CategoryID      string  `json:"category_id"`
-	CategoryName    string  `json:"category_name"`
-	CategoryColor   string  `json:"category_color"`
-	CreditCardID    string  `json:"credit_card_id"`
+	ID                 string  `json:"id"`
+	Title              string  `json:"title"`
+	Amount             int64   `json:"amount"`
+	CompetenceDate     string  `json:"competence_date"`
+	PaymentDate        *string `json:"payment_date"`
+	Status             string  `json:"status"`
+	SubcategoryID      string  `json:"subcategory_id"`
+	SubcategoryName    string  `json:"subcategory_name"`
+	CategoryID         string  `json:"category_id"`
+	CategoryName       string  `json:"category_name"`
+	CategoryColor      string  `json:"category_color"`
+	CreditCardID       string  `json:"credit_card_id"`
+	InstallmentGroupID *string `json:"installment_group_id"`
+	InstallmentNumber  *int    `json:"installment_number"`
+	InstallmentTotal   *int    `json:"installment_total"`
 }
 
 type invoiceDetailResp struct {
@@ -216,7 +219,10 @@ func toCardTxnResp(t shared.CardTransaction) cardTxnResp {
 		PaymentDate: t.PaymentDate, Status: t.Status,
 		SubcategoryID: t.SubcategoryID, SubcategoryName: t.SubcategoryName,
 		CategoryID: t.CategoryID, CategoryName: t.CategoryName, CategoryColor: t.CategoryColor,
-		CreditCardID: t.CreditCardID,
+		CreditCardID:       t.CreditCardID,
+		InstallmentGroupID: t.InstallmentGroupID,
+		InstallmentNumber:  t.InstallmentNumber,
+		InstallmentTotal:   t.InstallmentTotal,
 	}
 }
 

@@ -75,6 +75,9 @@ type transactionDetailResp struct {
 	AccountID            *string             `json:"account_id"`
 	DestinationAccountID *string             `json:"destination_account_id"`
 	CreditCardID         *string             `json:"credit_card_id"`
+	InstallmentGroupID   *string             `json:"installment_group_id"`
+	InstallmentNumber    *int                `json:"installment_number"`
+	InstallmentTotal     *int                `json:"installment_total"`
 	CreatedAt            string              `json:"created_at"`
 	UpdatedAt            string              `json:"updated_at"`
 	Subcategory          subcategoryInfoResp `json:"subcategory"`
@@ -136,6 +139,9 @@ func toDetailResp(d TransactionDetail) transactionDetailResp {
 		AccountID:            d.AccountID,
 		DestinationAccountID: d.DestinationAccountID,
 		CreditCardID:         d.CreditCardID,
+		InstallmentGroupID:   d.InstallmentGroupID,
+		InstallmentNumber:    d.InstallmentNumber,
+		InstallmentTotal:     d.InstallmentTotal,
 		CreatedAt:            d.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:            d.UpdatedAt.UTC().Format(time.RFC3339),
 		Subcategory: subcategoryInfoResp{
@@ -199,6 +205,9 @@ func parseTransactionFilter(r *http.Request) TransactionFilter {
 	}
 	if v := q.Get("credit_card_id"); v != "" {
 		f.CreditCardID = &v
+	}
+	if v := q.Get("installment_group_id"); v != "" {
+		f.InstallmentGroupID = &v
 	}
 
 	return f

@@ -22,6 +22,7 @@ import (
 	"github.com/local-finance-manager/backend/internal/config"
 	"github.com/local-finance-manager/backend/internal/creditcard"
 	"github.com/local-finance-manager/backend/internal/database"
+	"github.com/local-finance-manager/backend/internal/installment"
 	"github.com/local-finance-manager/backend/internal/middleware"
 	"github.com/local-finance-manager/backend/internal/transaction"
 )
@@ -185,6 +186,15 @@ func run(log *slog.Logger) error {
 		MonthSummary: creditcard.NewMonthlyCardSummary(ccRepo, cardReader),
 	})
 
+	// Parcelamento: módulo installment reaproveita catFacade (despesa) e cardChecker
+	// (cartão ativo); InvoiceReferenceFacade resolve a fatura de cada parcela.
+	installmentHandler := installment.NewHandler(installment.NewService(installment.Deps{
+		Repo:  installment.NewSQLiteRepository(db),
+		Subs:  catFacade,
+		Cards: cardChecker,
+		Refs:  creditcard.NewInvoiceReferenceFacade(ccRepo),
+	}))
+
 	r := chi.NewRouter()
 
 	// middleware.Error deve ser o primeiro: captura panics e formata qualquer
@@ -218,6 +228,7 @@ func run(log *slog.Logger) error {
 	r.Route("/api/subcategories", category.SubcategoryRoutes(categoryHandler))
 	r.Route("/api/transactions", transaction.Routes(transactionHandler))
 	r.Route("/api/credit-cards", creditcard.Routes(creditCardHandler))
+	r.Route("/api/installments", installment.Routes(installmentHandler))
 	r.Route("/api/backup", backup.Routes(backup.NewHandler(backupSvc)))
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {

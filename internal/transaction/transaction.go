@@ -78,6 +78,9 @@ type Transaction struct {
 	AccountID            *string // nullable v1
 	DestinationAccountID *string // nullable v1
 	CreditCardID         *string // nullable; só quando paymentMethod=cartao_credito
+	InstallmentGroupID   *string // nullable; preenchido quando é parcela de uma compra parcelada
+	InstallmentNumber    *int    // k (1-based), nullable
+	InstallmentTotal     *int    // N, nullable
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
@@ -135,6 +138,7 @@ type TransactionFilter struct {
 	PaymentDateTo      *string // YYYY-MM-DD inclusive
 	Search             *string // LOWER(title) LIKE '%search%'
 	CreditCardID       *string // filtra lançamentos vinculados a um cartão
+	InstallmentGroupID *string // filtra as parcelas de uma compra parcelada
 }
 
 // ─── Inputs de listagem ───────────────────────────────────────────────────────

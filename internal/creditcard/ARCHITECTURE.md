@@ -79,8 +79,12 @@ guia §3.3). A ponte é feita por interfaces + um DTO neutro em `shared`:
   Implementado por `transaction.CardReader` (produtor) e injetado no `main.go`.
   O retorno é `shared.CardTransaction` — data-carrier puro comum aos dois módulos.
 - **Valida vínculo** expondo `CreditCardChecker` (`facade.go`, produtor): satisfaz
-  `transaction.CreditCardChecker` por structural typing. `CheckLinkable` retorna
-  `ErrCreditCardNotFound`/`ErrCannotLinkArchivedCard` ou `nil`.
+  `transaction.CreditCardChecker` e `installment.CreditCardChecker` por structural typing.
+  `CheckLinkable` retorna `ErrCreditCardNotFound`/`ErrCannotLinkArchivedCard` ou `nil`.
+- **Resolve fatura de parcelas** expondo `InvoiceReferenceFacade` (`facade.go`, produtor):
+  satisfaz `installment.InvoiceReferenceResolver`. `ReferencesFor(cardID, dates)` busca o
+  cartão 1× e mapeia `InvoiceReferenceFor` (ciclo) sobre as datas — o `installment` resolve
+  a `reference` de cada parcela sem reimplementar o ciclo nem importar `creditcard`.
 
 ---
 
@@ -103,8 +107,10 @@ guia §3.3). A ponte é feita por interfaces + um DTO neutro em `shared`:
 
 ## Utilização do limite (RF-CC-07 / D11)
 
-- `UsedLimit` soma **apenas** as faturas em `{aberta, fechada, vencida}`. Faturas
-  `paga` e `futura` não comprometem o limite.
+- `UsedLimit` soma as faturas em `{aberta, fechada, vencida, futura}` — ou seja, **tudo
+  que não foi pago**. Faturas `paga` não comprometem o limite. **`futura` passou a contar
+  desde RF-PARC-10** (parcelamento): parcelas futuras comprometem o limite na hora da
+  compra (R$5.000 em 10x reserva R$5.000 já; libera R$500 a cada fatura paga).
 - `UtilizationPercent` = `usedLimit * 100 / creditLimit` (pode passar de 100%).
 - `ClassifyUtilization`: `<30 saudavel`, `30..69 atencao`, `70..90 alto`, `>90 critico`.
 - Compras **canceladas não contam** em nenhum agregado (`counts()` exclui `cancelado`).

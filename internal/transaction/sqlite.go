@@ -52,7 +52,8 @@ func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 const getSQL = `
 SELECT t.id, t.title, t.description, t.amount, t.type, t.subcategory_id,
        t.payment_method, t.status, t.competence_date, t.payment_date,
-       t.account_id, t.destination_account_id, t.credit_card_id, t.created_at, t.updated_at,
+       t.account_id, t.destination_account_id, t.credit_card_id,
+       t.installment_group_id, t.installment_number, t.installment_total, t.created_at, t.updated_at,
        s.id, s.name, COALESCE(s.icon,''), COALESCE(s.color,''),
        c.id, c.name, COALESCE(c.icon,''), COALESCE(c.color,'')
 FROM transactions t
@@ -171,6 +172,10 @@ func buildFilter(f TransactionFilter) (string, []any) {
 		conds = append(conds, "t.credit_card_id = ?")
 		args = append(args, *f.CreditCardID)
 	}
+	if f.InstallmentGroupID != nil {
+		conds = append(conds, "t.installment_group_id = ?")
+		args = append(args, *f.InstallmentGroupID)
+	}
 
 	return strings.Join(conds, " AND "), args
 }
@@ -180,7 +185,8 @@ func buildFilter(f TransactionFilter) (string, []any) {
 const listBaseSQL = `
 SELECT t.id, t.title, t.description, t.amount, t.type, t.subcategory_id,
        t.payment_method, t.status, t.competence_date, t.payment_date,
-       t.account_id, t.destination_account_id, t.credit_card_id, t.created_at, t.updated_at,
+       t.account_id, t.destination_account_id, t.credit_card_id,
+       t.installment_group_id, t.installment_number, t.installment_total, t.created_at, t.updated_at,
        s.id, s.name, COALESCE(s.icon,''), COALESCE(s.color,''),
        c.id, c.name, COALESCE(c.icon,''), COALESCE(c.color,'')
 FROM transactions t
@@ -261,13 +267,15 @@ type scanFunc func(dest ...any) error
 
 func scanDetail(scan scanFunc) (TransactionDetail, error) {
 	var d TransactionDetail
-	var desc, payDate, accID, destAccID, creditCardID sql.NullString
+	var desc, payDate, accID, destAccID, creditCardID, installmentGroupID sql.NullString
+	var installmentNumber, installmentTotal sql.NullInt64
 	var createdAt, updatedAt string
 
 	err := scan(
 		&d.ID, &d.Title, &desc, &d.Amount, (*string)(&d.Type), &d.SubcategoryID,
 		(*string)(&d.PaymentMethod), (*string)(&d.Status),
 		&d.CompetenceDate, &payDate, &accID, &destAccID, &creditCardID,
+		&installmentGroupID, &installmentNumber, &installmentTotal,
 		&createdAt, &updatedAt,
 		&d.Subcategory.ID, &d.Subcategory.Name, &d.Subcategory.Icon, &d.Subcategory.Color,
 		&d.Subcategory.Category.ID, &d.Subcategory.Category.Name,
@@ -291,6 +299,17 @@ func scanDetail(scan scanFunc) (TransactionDetail, error) {
 	}
 	if creditCardID.Valid {
 		d.CreditCardID = &creditCardID.String
+	}
+	if installmentGroupID.Valid {
+		d.InstallmentGroupID = &installmentGroupID.String
+	}
+	if installmentNumber.Valid {
+		n := int(installmentNumber.Int64)
+		d.InstallmentNumber = &n
+	}
+	if installmentTotal.Valid {
+		n := int(installmentTotal.Int64)
+		d.InstallmentTotal = &n
 	}
 
 	d.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)

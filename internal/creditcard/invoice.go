@@ -194,8 +194,10 @@ func UsedLimit(buckets map[string][]shared.CardTransaction, card CreditCard, tod
 			return 0, err
 		}
 		_, hasPayment := payments[ref]
+		// StatusFutura entra no usedLimit (RF-PARC-10): parcelas futuras de compras
+		// parceladas comprometem o limite na hora da compra. usedLimit = tudo não-pago.
 		switch DeriveInvoiceStatus(today, cycleStart, closingDate, dueDate, hasPayment) {
-		case StatusAberta, StatusFechada, StatusVencida:
+		case StatusAberta, StatusFechada, StatusVencida, StatusFutura:
 			used += sumAmount(txns)
 		}
 	}

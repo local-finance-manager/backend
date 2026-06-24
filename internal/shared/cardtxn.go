@@ -18,4 +18,8 @@ type CardTransaction struct {
 	CategoryName    string
 	CategoryColor   string
 	CreditCardID    string // sempre preenchido nesta projeção
+	// Parcelamento (nil quando o lançamento não é parcela) — para exibir "k/N" na fatura.
+	InstallmentGroupID *string
+	InstallmentNumber  *int
+	InstallmentTotal   *int
 }

@@ -216,3 +216,19 @@ cancelado  → pendente            (cancelado → realizado é PROIBIDO; passe p
 
 > `PUT` tem semântica de full-replace dos campos mutáveis.
 > `PATCH .../confirm` é a transição dedicada para `realizado`.
+
+---
+
+## Parcelamento (colunas de installment)
+
+A tabela `transactions` tem 3 colunas nullable de parcelamento (migration `0007`):
+`installment_group_id` (FK → `installment_groups`, `ON DELETE CASCADE`),
+`installment_number` (k) e `installment_total` (N).
+
+- **Quem escreve as parcelas:** o módulo `internal/installment` (não o `transaction`).
+  As parcelas são lançamentos `pendente`/`cartao_credito`/`despesa` gerados atomicamente
+  pelo `installment` na mesma `tx` do grupo. Ver `installment/ARCHITECTURE.md`.
+- **Aqui:** `Create`/`Update` à vista deixam essas colunas `NULL`; o `scanDetail` e os
+  `SELECT` (`getSQL`/`listBaseSQL`) as leem e o handler as expõe (`installment_group_id`,
+  `installment_number`, `installment_total`) para a UI mostrar "k/N" e linkar ao grupo.
+- **Filtro:** `?installment_group_id=` lista as parcelas de uma compra.

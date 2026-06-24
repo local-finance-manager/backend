@@ -19,7 +19,8 @@ func NewCardReader(db *sql.DB) *CardReader { return &CardReader{db: db} }
 
 const cardTxnSQL = `
 SELECT t.id, t.title, t.amount, t.competence_date, t.payment_date, t.status,
-       t.subcategory_id, s.name, c.id, c.name, COALESCE(c.color,''), t.credit_card_id
+       t.subcategory_id, s.name, c.id, c.name, COALESCE(c.color,''), t.credit_card_id,
+       t.installment_group_id, t.installment_number, t.installment_total
 FROM transactions t
 JOIN subcategories s ON s.id = t.subcategory_id
 JOIN categories    c ON c.id = s.category_id
@@ -59,16 +60,28 @@ func (r *CardReader) HasTransactions(ctx context.Context, cardID string) (bool, 
 
 func scanCardTxn(scan scanFunc) (shared.CardTransaction, error) {
 	var t shared.CardTransaction
-	var payDate sql.NullString
+	var payDate, installmentGroupID sql.NullString
+	var installmentNumber, installmentTotal sql.NullInt64
 	if err := scan(
 		&t.ID, &t.Title, &t.Amount, &t.CompetenceDate, &payDate, &t.Status,
 		&t.SubcategoryID, &t.SubcategoryName, &t.CategoryID, &t.CategoryName, &t.CategoryColor,
-		&t.CreditCardID,
+		&t.CreditCardID, &installmentGroupID, &installmentNumber, &installmentTotal,
 	); err != nil {
 		return shared.CardTransaction{}, err
 	}
 	if payDate.Valid {
 		t.PaymentDate = &payDate.String
+	}
+	if installmentGroupID.Valid {
+		t.InstallmentGroupID = &installmentGroupID.String
+	}
+	if installmentNumber.Valid {
+		n := int(installmentNumber.Int64)
+		t.InstallmentNumber = &n
+	}
+	if installmentTotal.Valid {
+		n := int(installmentTotal.Int64)
+		t.InstallmentTotal = &n
 	}
 	return t, nil
 }
