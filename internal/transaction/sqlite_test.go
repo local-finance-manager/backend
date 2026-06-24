@@ -73,6 +73,9 @@ func newTestDB(t *testing.T) *sql.DB {
 		account_id              TEXT,
 		destination_account_id  TEXT,
 		credit_card_id          TEXT,
+		installment_group_id    TEXT,
+		installment_number      INTEGER,
+		installment_total       INTEGER,
 		created_at              TEXT    NOT NULL,
 		updated_at              TEXT    NOT NULL
 	)`)

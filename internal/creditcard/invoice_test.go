@@ -148,9 +148,10 @@ func TestUsedLimit(t *testing.T) {
 	}
 }
 
-func TestUsedLimit_FutureNotCounted(t *testing.T) {
+func TestUsedLimit_FutureCounted(t *testing.T) {
 	c := card(3, 10)
-	// today antes de qualquer ciclo → todas futuras → usedLimit 0
+	// today antes de qualquer ciclo → fatura futura. Desde RF-PARC-10, faturas futuras
+	// (ex.: parcelas de uma compra parcelada) TAMBÉM comprometem o limite.
 	txns := []shared.CardTransaction{
 		mkTxn("a", 50000, "2026-12-20", "c", "C", "#f"),
 	}
@@ -162,8 +163,24 @@ func TestUsedLimit_FutureNotCounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UsedLimit: %v", err)
 	}
+	if used != 50000 {
+		t.Errorf("fatura futura deve comprometer limite (RF-PARC-10): got %d, want 50000", used)
+	}
+}
+
+func TestUsedLimit_PaidFutureNotCounted(t *testing.T) {
+	c := card(3, 10)
+	// fatura futura mas paga → não conta (paga nunca compromete)
+	txns := []shared.CardTransaction{mkTxn("a", 50000, "2026-12-20", "c", "C", "#f")}
+	buckets, _ := creditcardBuckets(txns, c.ClosingDay)
+	ref, _ := creditcard.InvoiceReferenceFor("2026-12-20", c.ClosingDay)
+	payments := map[string]*creditcard.InvoicePayment{ref: {Reference: ref, PaymentDate: "2026-12-10"}}
+	used, err := creditcard.UsedLimit(buckets, c, "2026-06-01", payments)
+	if err != nil {
+		t.Fatalf("UsedLimit: %v", err)
+	}
 	if used != 0 {
-		t.Errorf("fatura futura não deveria comprometer limite: got %d, want 0", used)
+		t.Errorf("futura paga não deveria comprometer limite: got %d, want 0", used)
 	}
 }
 
