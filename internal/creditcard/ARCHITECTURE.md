@@ -19,7 +19,7 @@ internal/creditcard/
 ├── ARCHITECTURE.md     # este documento
 ├── creditcard.go       # domínio: entidade, enums, erros, regras de ciclo/utilização, validação
 ├── invoice.go          # domínio: projeções de fatura + agregações puras (BuildInvoice, UsedLimit, breakdown)
-├── repository.go       # interfaces: CreditCardRepository, InvoicePaymentRepository, CardTransactionReader (port)
+├── repository.go       # interfaces: CreditCardRepository, InvoicePaymentRepository, CardTransactionReader, SubcategoryReader (ports)
 ├── usecases.go         # tipos de I/O + interfaces de caso de uso
 ├── usecases_impl.go    # implementações dos use cases (cartões, faturas, pagamento, resumo)
 ├── facade.go           # adapter produtor: CreditCardChecker (consumido por transaction)
@@ -85,6 +85,31 @@ guia §3.3). A ponte é feita por interfaces + um DTO neutro em `shared`:
   satisfaz `installment.InvoiceReferenceResolver`. `ReferencesFor(cardID, dates)` busca o
   cartão 1× e mapeia `InvoiceReferenceFor` (ciclo) sobre as datas — o `installment` resolve
   a `reference` de cada parcela sem reimplementar o ciclo nem importar `creditcard`.
+- **Deriva o tipo do lançamento de pagamento** via port `SubcategoryReader` (consumidor),
+  satisfeito por `category.SubcategoryFacade` (`GetSubcategoryType`). Usado no pagamento de
+  fatura (E1) para que o lançamento de pagamento nasça com o tipo da subcategoria escolhida.
+
+---
+
+## Decisão (E1): pagamento de fatura é atômico e escreve em `transactions`
+
+`PayInvoice` (`PATCH .../pay`) faz **três** escritas numa **única transação**
+(`InvoicePaymentRepository.PayInvoiceAtomic`, RF-PAGFAT-04):
+
+1. **Baixa em lote** das compras pendentes do ciclo → `realizado` com `payment_date`.
+2. **Cria o lançamento de pagamento** (`realizado`, sem `credit_card_id`; tipo derivado da
+   subcategoria, default transferência → neutro ao fluxo, anti-dupla-contagem RF-PAGFAT-06).
+3. **Grava o registro** em `credit_card_invoice_payments` com o `transaction_id` criado.
+
+`UndoInvoicePayment` (`DELETE .../pay`) reverte tudo numa transação (D2): compras
+`realizado → pendente` (limpa `payment_date`), exclui o lançamento de pagamento e remove o
+registro.
+
+> **Exceção de posse de tabela (Opção A — igual ao `installment`):** estes dois métodos do
+> `InvoicePaymentRepository` escrevem na tabela `transactions` (posse do módulo `transaction`)
+> dentro da própria `tx`. É a única forma de obter atomicidade cross-module — ports em módulos
+> distintos rodariam em transações separadas. O `creditcard` continua **não importando** o
+> pacote `transaction`. `payment_method` do lançamento de pagamento é `"outros"` (DA3).
 
 ---
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Lucas-Lopes-II/govalidator/domainerr"
+	"github.com/Lucas-Lopes-II/govalidator/validation"
 	"github.com/google/uuid"
 
 	"github.com/local-finance-manager/backend/internal/shared"
@@ -268,16 +269,24 @@ type payInvoiceImpl struct {
 	repo    CreditCardRepository
 	payRepo InvoicePaymentRepository
 	reader  CardTransactionReader
+	subs    SubcategoryReader
 	now     func() time.Time
 }
 
-func NewPayInvoice(repo CreditCardRepository, payRepo InvoicePaymentRepository, reader CardTransactionReader) PayInvoiceUseCase {
-	return &payInvoiceImpl{repo: repo, payRepo: payRepo, reader: reader, now: time.Now}
+func NewPayInvoice(repo CreditCardRepository, payRepo InvoicePaymentRepository, reader CardTransactionReader, subs SubcategoryReader) PayInvoiceUseCase {
+	return &payInvoiceImpl{repo: repo, payRepo: payRepo, reader: reader, subs: subs, now: time.Now}
 }
 
+// Execute registra o pagamento de uma fatura fechada/vencida (E1): atomicamente realiza em
+// lote as compras pendentes do ciclo, cria o lançamento de pagamento (realizado, sem cartão)
+// e grava o registro de pagamento. Sem dupla contagem: o lançamento nasce com o tipo da
+// subcategoria (default transferência → neutro ao fluxo — RF-PAGFAT-06).
 func (uc *payInvoiceImpl) Execute(ctx context.Context, in PayInvoiceInput) (Invoice, error) {
-	if !isValidDate(in.PaymentDate) {
-		return Invoice{}, domainerr.NewBadRequest("data de pagamento inválida: use YYYY-MM-DD", domainerr.WithDisplayable())
+	if err := validation.NewAccumulator().
+		Check(isValidDate(in.PaymentDate), "data de pagamento inválida: use YYYY-MM-DD").
+		Check(in.SubcategoryID != "", "subcategoria é obrigatória").
+		Result(); err != nil {
+		return Invoice{}, err
 	}
 	card, err := uc.repo.Get(ctx, in.CardID)
 	if err != nil {
@@ -304,16 +313,77 @@ func (uc *payInvoiceImpl) Execute(ctx context.Context, in PayInvoiceInput) (Invo
 		return Invoice{}, ErrInvoiceNotClosed
 	}
 
-	payment := InvoicePayment{
-		Reference:     in.Reference,
-		PaymentDate:   in.PaymentDate,
-		TransactionID: in.TransactionID,
-		CreatedAt:     time.Now().UTC(),
+	// Tipo do lançamento de pagamento = tipo da subcategoria escolhida (default transferência).
+	subType, err := uc.subs.GetSubcategoryType(ctx, in.SubcategoryID)
+	if err != nil {
+		return Invoice{}, err
 	}
-	if err := uc.payRepo.Upsert(ctx, in.CardID, payment); err != nil {
+
+	// IDs das compras pendentes do ciclo a realizar (já realizadas/canceladas são ignoradas).
+	var realizeIDs []string
+	for _, t := range cycleTxns {
+		if t.Status == statusPendente {
+			realizeIDs = append(realizeIDs, t.ID)
+		}
+	}
+
+	now := time.Now().UTC()
+	payment := PaymentTxn{
+		ID:             uuid.New().String(),
+		Title:          paymentTitle(in.Title, in.Reference),
+		Description:    in.Description,
+		Amount:         inv.Total,
+		Type:           subType,
+		SubcategoryID:  in.SubcategoryID,
+		PaymentMethod:  "outros", // DA3: a fatura pode ser paga por pix/débito/boleto
+		CompetenceDate: in.PaymentDate,
+		PaymentDate:    in.PaymentDate,
+		CreatedAt:      now,
+	}
+	if err := uc.payRepo.PayInvoiceAtomic(ctx, AtomicPayInput{
+		CardID:     in.CardID,
+		Reference:  in.Reference,
+		RealizeIDs: realizeIDs,
+		RealizeAt:  in.PaymentDate,
+		Payment:    payment,
+	}); err != nil {
 		return Invoice{}, domainerr.NewInternal("erro ao registrar pagamento da fatura")
 	}
-	return BuildInvoice(in.Reference, cycleTxns, card, today, &payment)
+
+	rec := InvoicePayment{
+		Reference:     in.Reference,
+		PaymentDate:   in.PaymentDate,
+		TransactionID: &payment.ID,
+		CreatedAt:     now,
+	}
+	return BuildInvoice(in.Reference, markRealized(cycleTxns, realizeIDs, in.PaymentDate), card, today, &rec)
+}
+
+// paymentTitle devolve o título informado ou um default legível.
+func paymentTitle(title, reference string) string {
+	if title != "" {
+		return title
+	}
+	return "Pagamento de Fatura — " + reference
+}
+
+// markRealized devolve uma cópia do ciclo com as compras realizadas (para a projeção de
+// resposta refletir o estado pós-pagamento sem reler do banco).
+func markRealized(txns []shared.CardTransaction, realizedIDs []string, payDate string) []shared.CardTransaction {
+	realized := make(map[string]struct{}, len(realizedIDs))
+	for _, id := range realizedIDs {
+		realized[id] = struct{}{}
+	}
+	out := make([]shared.CardTransaction, len(txns))
+	copy(out, txns)
+	for i := range out {
+		if _, ok := realized[out[i].ID]; ok {
+			out[i].Status = statusRealizado
+			pd := payDate
+			out[i].PaymentDate = &pd
+		}
+	}
+	return out
 }
 
 // ─── undoInvoicePaymentImpl ─────────────────────────────────────────────────
@@ -329,20 +399,61 @@ func NewUndoInvoicePayment(repo CreditCardRepository, payRepo InvoicePaymentRepo
 	return &undoInvoicePaymentImpl{repo: repo, payRepo: payRepo, reader: reader, now: time.Now}
 }
 
+// Execute desfaz o pagamento (D2): atomicamente reverte as compras do ciclo para pendente,
+// exclui o lançamento de pagamento e remove o registro de pagamento.
 func (uc *undoInvoicePaymentImpl) Execute(ctx context.Context, cardID, reference string) (Invoice, error) {
 	card, err := uc.repo.Get(ctx, cardID)
 	if err != nil {
 		return Invoice{}, err
 	}
-	if err := uc.payRepo.Delete(ctx, cardID, reference); err != nil {
-		return Invoice{}, err // ErrInvoiceNotFound se não havia pagamento
+	payment, err := uc.payRepo.Get(ctx, cardID, reference)
+	if err != nil {
+		return Invoice{}, err
+	}
+	if payment == nil {
+		return Invoice{}, ErrInvoiceNotFound
 	}
 	today := todayFrom(uc.now)
 	buckets, _, err := gatherBuckets(ctx, card, uc.reader, uc.payRepo, today)
 	if err != nil {
 		return Invoice{}, err
 	}
-	return BuildInvoice(reference, buckets[reference], card, today, nil)
+	cycleTxns := buckets[reference]
+
+	// Compras realizadas do ciclo a reverter para pendente.
+	var revertIDs []string
+	for _, t := range cycleTxns {
+		if t.Status == statusRealizado {
+			revertIDs = append(revertIDs, t.ID)
+		}
+	}
+
+	if err := uc.payRepo.UndoPaymentAtomic(ctx, AtomicUndoInput{
+		CardID:       cardID,
+		Reference:    reference,
+		RevertIDs:    revertIDs,
+		PaymentTxnID: ptrVal(payment.TransactionID),
+	}); err != nil {
+		return Invoice{}, err // ErrInvoiceNotFound se não havia registro
+	}
+	return BuildInvoice(reference, markPending(cycleTxns, revertIDs), card, today, nil)
+}
+
+// markPending devolve uma cópia do ciclo com as compras revertidas para pendente.
+func markPending(txns []shared.CardTransaction, revertIDs []string) []shared.CardTransaction {
+	reverted := make(map[string]struct{}, len(revertIDs))
+	for _, id := range revertIDs {
+		reverted[id] = struct{}{}
+	}
+	out := make([]shared.CardTransaction, len(txns))
+	copy(out, txns)
+	for i := range out {
+		if _, ok := reverted[out[i].ID]; ok {
+			out[i].Status = statusPendente
+			out[i].PaymentDate = nil
+		}
+	}
+	return out
 }
 
 // ─── monthlyCardSummaryImpl ─────────────────────────────────────────────────

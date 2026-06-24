@@ -99,7 +99,7 @@ func (r *SQLiteCategoryRepository) GetWithSubcategories(ctx context.Context, id 
 	}
 
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT id, category_id, name, icon, color, can_be_deleted, created_at, updated_at"+
+		"SELECT id, category_id, name, icon, color, can_be_deleted, is_balance_adjustment, created_at, updated_at"+
 			" FROM subcategories WHERE category_id = ? ORDER BY LOWER(name) ASC", id)
 	if err != nil {
 		return CategoryWithSubs{}, fmt.Errorf("category repo: get with subs: %w", err)
@@ -203,7 +203,7 @@ func (r *SQLiteSubcategoryRepository) List(ctx context.Context, categoryID strin
 
 	// p.OrderBy and p.Order are validated by ParsePagination (allowlist + normalize).
 	dataSQL := fmt.Sprintf(
-		"SELECT id, category_id, name, icon, color, can_be_deleted, created_at, updated_at"+
+		"SELECT id, category_id, name, icon, color, can_be_deleted, is_balance_adjustment, created_at, updated_at"+
 			" FROM subcategories %s ORDER BY %s %s LIMIT ? OFFSET ?",
 		where, p.OrderBy, p.Order,
 	)
@@ -232,7 +232,7 @@ func (r *SQLiteSubcategoryRepository) List(ctx context.Context, categoryID strin
 func (r *SQLiteSubcategoryRepository) ListAllByType(ctx context.Context, t CategoryType) ([]Subcategory, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT s.id, s.category_id, s.name, s.icon, s.color,
-		       s.can_be_deleted, s.created_at, s.updated_at
+		       s.can_be_deleted, s.is_balance_adjustment, s.created_at, s.updated_at
 		FROM   subcategories s
 		JOIN   categories c ON c.id = s.category_id
 		WHERE  c.type = ?
@@ -259,7 +259,7 @@ func (r *SQLiteSubcategoryRepository) ListAllByType(ctx context.Context, t Categ
 
 func (r *SQLiteSubcategoryRepository) Get(ctx context.Context, id string) (Subcategory, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT id, category_id, name, icon, color, can_be_deleted, created_at, updated_at"+
+		"SELECT id, category_id, name, icon, color, can_be_deleted, is_balance_adjustment, created_at, updated_at"+
 			" FROM subcategories WHERE id = ?", id)
 	s, err := scanSubcategory(row)
 	if err == sql.ErrNoRows {
@@ -273,10 +273,11 @@ func (r *SQLiteSubcategoryRepository) Get(ctx context.Context, id string) (Subca
 
 func (r *SQLiteSubcategoryRepository) Create(ctx context.Context, s Subcategory) error {
 	_, err := r.db.ExecContext(ctx,
-		"INSERT INTO subcategories (id, category_id, name, icon, color, can_be_deleted, created_at, updated_at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO subcategories (id, category_id, name, icon, color, can_be_deleted, is_balance_adjustment, created_at, updated_at)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		s.ID, s.CategoryID, s.Name, toNullString(s.Icon), toNullString(s.Color),
-		boolToInt(s.CanBeDeleted), s.CreatedAt.UTC().Format(time.RFC3339), s.UpdatedAt.UTC().Format(time.RFC3339),
+		boolToInt(s.CanBeDeleted), boolToInt(s.IsBalanceAdjustment),
+		s.CreatedAt.UTC().Format(time.RFC3339), s.UpdatedAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return fmt.Errorf("subcategory repo: create: %w", err)
@@ -341,15 +342,16 @@ func scanCategory(s scanner) (Category, error) {
 func scanSubcategory(s scanner) (Subcategory, error) {
 	var sub Subcategory
 	var icon, color sql.NullString
-	var canBeDel int
+	var canBeDel, balanceAdj int
 	var createdAt, updatedAt string
 
-	if err := s.Scan(&sub.ID, &sub.CategoryID, &sub.Name, &icon, &color, &canBeDel, &createdAt, &updatedAt); err != nil {
+	if err := s.Scan(&sub.ID, &sub.CategoryID, &sub.Name, &icon, &color, &canBeDel, &balanceAdj, &createdAt, &updatedAt); err != nil {
 		return Subcategory{}, err
 	}
 	sub.Icon = icon.String
 	sub.Color = color.String
 	sub.CanBeDeleted = canBeDel != 0
+	sub.IsBalanceAdjustment = balanceAdj != 0
 	sub.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	sub.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return sub, nil

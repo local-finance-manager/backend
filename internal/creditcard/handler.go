@@ -151,7 +151,9 @@ type cardReq struct {
 
 type payInvoiceReq struct {
 	PaymentDate   string  `json:"payment_date"`
-	TransactionID *string `json:"transaction_id"`
+	SubcategoryID string  `json:"subcategory_id"`
+	Title         string  `json:"title"`
+	Description   *string `json:"description"`
 }
 
 // ─── Converters ─────────────────────────────────────────────────────────────
@@ -370,7 +372,9 @@ func (h *Handler) PayInvoice(w http.ResponseWriter, r *http.Request) {
 		CardID:        chi.URLParam(r, "id"),
 		Reference:     chi.URLParam(r, "reference"),
 		PaymentDate:   req.PaymentDate,
-		TransactionID: req.TransactionID,
+		SubcategoryID: req.SubcategoryID,
+		Title:         req.Title,
+		Description:   req.Description,
 	})
 	if err != nil {
 		domainerr.WriteError(w, err)

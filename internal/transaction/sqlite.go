@@ -256,8 +256,66 @@ func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) 
 			s.TotalPendente += totalAmount
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return Summary{}, err
+	}
 	s.SaldoPeriodo = s.TotalReceitas - s.TotalDespesas
-	return s, rows.Err()
+
+	// E6 (saldo acumulado): SaldoInicial e SaldoFinal usam SÓ as datas do filtro (ignoram
+	// tipo/categoria/cartão/busca) — um "saldo" filtrado por categoria não faria sentido.
+	carryover, err := r.carryoverBalance(ctx, f.CompetenceDateFrom)
+	if err != nil {
+		return Summary{}, err
+	}
+	adjustments, err := r.adjustmentsTotal(ctx, f.CompetenceDateTo)
+	if err != nil {
+		return Summary{}, err
+	}
+	s.SaldoInicial = carryover + adjustments
+	s.SaldoFinal = s.SaldoInicial + s.SaldoPeriodo
+	return s, nil
+}
+
+// carryoverBalance soma o fluxo (receita - despesa) de lançamentos realizados, sem cartão
+// (D14), com competência ANTES de `from`. É o saldo acumulado carregado para o período.
+// Sem `from` (período aberto à esquerda) não há carryover → 0.
+func (r *SQLiteRepository) carryoverBalance(ctx context.Context, from *string) (int64, error) {
+	if from == nil {
+		return 0, nil
+	}
+	const q = `
+SELECT COALESCE(SUM(CASE
+		WHEN t.type = 'receita' THEN t.amount
+		WHEN t.type = 'despesa' THEN -t.amount
+		ELSE 0 END), 0)
+FROM transactions t
+WHERE t.status = 'realizado' AND t.credit_card_id IS NULL AND t.competence_date < ?`
+	var v int64
+	if err := r.db.QueryRowContext(ctx, q, *from).Scan(&v); err != nil {
+		return 0, fmt.Errorf("transaction sqlite: carryover: %w", err)
+	}
+	return v, nil
+}
+
+// adjustmentsTotal soma os ajustes de saldo (is_balance_adjustment) realizados até `to`
+// (inclusive). São transferências que estabelecem patrimônio → entram no saldo acumulado,
+// não no fluxo. Sem `to` (período aberto à direita) soma todos os ajustes.
+func (r *SQLiteRepository) adjustmentsTotal(ctx context.Context, to *string) (int64, error) {
+	q := `
+SELECT COALESCE(SUM(t.amount), 0)
+FROM transactions t
+JOIN subcategories s ON s.id = t.subcategory_id
+WHERE t.status = 'realizado' AND s.is_balance_adjustment = 1`
+	args := []any{}
+	if to != nil {
+		q += " AND t.competence_date <= ?"
+		args = append(args, *to)
+	}
+	var v int64
+	if err := r.db.QueryRowContext(ctx, q, args...).Scan(&v); err != nil {
+		return 0, fmt.Errorf("transaction sqlite: adjustments total: %w", err)
+	}
+	return v, nil
 }
 
 // ─── Scan helper ──────────────────────────────────────────────────────────────

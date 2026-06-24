@@ -68,14 +68,15 @@ type categoryWithSubsResp struct {
 }
 
 type subcategoryResp struct {
-	ID           string `json:"id"`
-	CategoryID   string `json:"category_id"`
-	Name         string `json:"name"`
-	Icon         string `json:"icon,omitempty"`
-	Color        string `json:"color,omitempty"`
-	CanBeDeleted bool   `json:"can_be_deleted"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ID                  string `json:"id"`
+	CategoryID          string `json:"category_id"`
+	Name                string `json:"name"`
+	Icon                string `json:"icon,omitempty"`
+	Color               string `json:"color,omitempty"`
+	CanBeDeleted        bool   `json:"can_be_deleted"`
+	IsBalanceAdjustment bool   `json:"is_balance_adjustment"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 // ─── Request types ────────────────────────────────────────────────────────────
@@ -123,14 +124,15 @@ func toCategoryResp(c Category) categoryResp {
 
 func toSubcategoryResp(s Subcategory) subcategoryResp {
 	return subcategoryResp{
-		ID:           s.ID,
-		CategoryID:   s.CategoryID,
-		Name:         s.Name,
-		Icon:         s.Icon,
-		Color:        s.Color,
-		CanBeDeleted: s.CanBeDeleted,
-		CreatedAt:    s.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:    s.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:                  s.ID,
+		CategoryID:          s.CategoryID,
+		Name:                s.Name,
+		Icon:                s.Icon,
+		Color:               s.Color,
+		CanBeDeleted:        s.CanBeDeleted,
+		IsBalanceAdjustment: s.IsBalanceAdjustment,
+		CreatedAt:           s.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:           s.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 

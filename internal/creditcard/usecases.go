@@ -38,12 +38,16 @@ type InvoiceDetail struct {
 	Pagination shared.PagedMeta
 }
 
-// PayInvoiceInput é o payload para marcar uma fatura como paga.
+// PayInvoiceInput é o payload para registrar o pagamento de uma fatura (E1). Ao confirmar,
+// o sistema realiza em lote as compras do ciclo e cria o lançamento de pagamento (o
+// TransactionID antigo deixou de ser input — agora é gerado).
 type PayInvoiceInput struct {
 	CardID        string
 	Reference     string
 	PaymentDate   string
-	TransactionID *string
+	SubcategoryID string  // subcategoria do lançamento de pagamento (default: transferência)
+	Title         string  // opcional; default "Pagamento de Fatura — <reference>"
+	Description   *string // opcional
 }
 
 // ─── Interfaces de use case ─────────────────────────────────────────────────

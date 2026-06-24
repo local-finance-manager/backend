@@ -135,6 +135,19 @@ Todos os registros do seed têm `can_be_deleted = 0`. As regras de negócio apli
 - **DeleteSubcategory**: verifica `CanBeDeleted`
 - **UpdateCategory/UpdateSubcategory**: permite atualizar `Name`, `Icon`, `Color` mesmo em registros do sistema
 
+### `is_balance_adjustment` (E6 — ajuste de saldo)
+
+`Subcategory` tem o flag `is_balance_adjustment` (coluna na migração `0008`). Marca
+subcategorias **de ajuste de saldo** — lançamentos nelas entram no **saldo acumulado** do
+resumo (`transaction.Summary.saldoInicial`), não no fluxo de receitas/despesas (RF-SALDO-02).
+
+- O seed `0008` cria, na categoria `cat-transferencias`: **"Saldo Inicial"** e **"Saldo do
+  Mês Anterior"** (`is_balance_adjustment = 1`) e **"Pagamento de Fatura de Cartão"**
+  (`is_balance_adjustment = 0`, usada como default pelo pagamento de fatura — E1).
+- O flag é **imutável via CRUD** (como `Type`/`CanBeDeleted`): `Create` grava `0` para
+  subcategorias criadas pelo usuário (D6 — só o seed tem ajustes) e `Update` não toca a coluna.
+- Exposto na API como `is_balance_adjustment` (booleano).
+
 ---
 
 ## Tipos de erro (domainerr)

@@ -181,7 +181,7 @@ func run(log *slog.Logger) error {
 		Archive:      creditcard.NewArchiveCreditCard(ccRepo),
 		ListInvoices: creditcard.NewListInvoices(ccRepo, ccPayRepo, cardReader),
 		GetInvoice:   creditcard.NewGetInvoice(ccRepo, ccPayRepo, cardReader),
-		PayInvoice:   creditcard.NewPayInvoice(ccRepo, ccPayRepo, cardReader),
+		PayInvoice:   creditcard.NewPayInvoice(ccRepo, ccPayRepo, cardReader, catFacade),
 		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, ccPayRepo, cardReader),
 		MonthSummary: creditcard.NewMonthlyCardSummary(ccRepo, cardReader),
 	})

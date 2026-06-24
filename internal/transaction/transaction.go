@@ -117,9 +117,15 @@ type TransactionDetail struct {
 type Summary struct {
 	TotalDespesas int64 `json:"totalDespesas"` // realizado + despesa
 	TotalReceitas int64 `json:"totalReceitas"` // realizado + receita
-	SaldoPeriodo  int64 `json:"saldoPeriodo"`  // totalReceitas - totalDespesas
+	SaldoPeriodo  int64 `json:"saldoPeriodo"`  // totalReceitas - totalDespesas (fluxo do período)
 	TotalPendente int64 `json:"totalPendente"` // pendente (any type)
 	CountTotal    int   `json:"countTotal"`    // total records matching the filter
+	// SaldoInicial é o saldo acumulado de abertura do período (E6/RF-SALDO-03):
+	// carryover (receita-despesa realizado antes de CompetenceDateFrom) + ajustes de
+	// saldo realizados (is_balance_adjustment) até CompetenceDateTo.
+	SaldoInicial int64 `json:"saldoInicial"`
+	// SaldoFinal = SaldoInicial + SaldoPeriodo (saldo acumulado de fechamento).
+	SaldoFinal int64 `json:"saldoFinal"`
 }
 
 // ─── Filtros ──────────────────────────────────────────────────────────────────

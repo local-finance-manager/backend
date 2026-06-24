@@ -45,8 +45,12 @@ type Subcategory struct {
 	Icon         string
 	Color        string
 	CanBeDeleted bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// IsBalanceAdjustment marca subcategorias de ajuste de saldo (ex.: "Saldo Inicial").
+	// Lançamentos nessas subcategorias entram no saldo acumulado, não no fluxo de
+	// receitas/despesas (E6/RF-SALDO-02). Vem do seed; imutável via CRUD (RF-SALDO-04).
+	IsBalanceAdjustment bool
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // CategoryWithSubs is a read-only projection used by GetCategory.

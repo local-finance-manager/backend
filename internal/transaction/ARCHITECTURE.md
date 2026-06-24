@@ -93,6 +93,12 @@ módulos). É definido aqui (produtor) e injetado no `main.go`.
 Mantém a regra do monolito modular: `transaction` não importa `creditcard` e
 vice-versa; a ponte é `shared.CardTransaction` + injeção no Composition Root.
 
+> **Exceção de escrita (E1 — pagamento de fatura):** ao registrar o pagamento de uma fatura,
+> o módulo `creditcard` escreve em `transactions` **dentro da própria `tx`** (baixa em lote
+> das compras → `realizado` + criação do lançamento de pagamento), para garantir atomicidade
+> cross-module (Opção A, como o `installment`). É a única exceção em que outro módulo grava
+> nesta tabela; ver `creditcard/ARCHITECTURE.md` (Decisão E1).
+
 ---
 
 ## Padrão: use case structs individuais
@@ -141,7 +147,9 @@ financeiro junto da página. A resposta é:
     "totalReceitas": 0,
     "saldoPeriodo": 0,
     "totalPendente": 0,
-    "countTotal": 0
+    "countTotal": 0,
+    "saldoInicial": 0,
+    "saldoFinal": 0
   },
   "pagination": { "page": 1, "limit": 50, "total": 0, "total_pages": 0, "sort": "...", "sort_dir": "..." }
 }
@@ -150,6 +158,21 @@ financeiro junto da página. A resposta é:
 - `total`/`total_pages` vêm de `summary.CountTotal` (mesmo filtro, sem `LIMIT`).
 - O sumário considera apenas lançamentos `realizado` para receitas/despesas;
   `totalPendente` soma os `pendente` de qualquer tipo.
+
+### Saldo acumulado (E6 — `saldoInicial` / `saldoFinal`)
+
+Além do **fluxo do período** (`saldoPeriodo = totalReceitas − totalDespesas`), o resumo expõe
+o **saldo acumulado** (running balance), distinto do fluxo:
+
+- `saldoInicial` = **carryover** (Σ `receita − despesa` de lançamentos `realizado`, sem cartão,
+  com `competence_date < competence_date_from`) **+** **ajustes de saldo** (Σ `amount` de
+  lançamentos `realizado` em subcategorias com `is_balance_adjustment`, até `competence_date_to`).
+- `saldoFinal` = `saldoInicial + saldoPeriodo`.
+- Os **ajustes de saldo** (E6/`category.is_balance_adjustment`) são `transferencia` → já ficam
+  fora de `totalReceitas`/`totalDespesas`; o flag os inclui no saldo acumulado (RF-SALDO-02/03).
+- `saldoInicial`/`saldoFinal` usam **apenas as datas** do filtro (ignoram tipo/categoria/cartão/
+  busca) — um "saldo" filtrado por categoria não faria sentido. `GetSummary` faz 3 agregações
+  (período, carryover, ajustes); ver `carryoverBalance`/`adjustmentsTotal` em `sqlite.go`.
 
 ### Paginação (defaults do módulo)
 

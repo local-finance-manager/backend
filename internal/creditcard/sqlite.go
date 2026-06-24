@@ -217,6 +217,115 @@ func (r *SQLiteInvoicePaymentRepository) Delete(ctx context.Context, cardID, ref
 	return nil
 }
 
+// ─── Pagamento atômico de fatura (E1) ───────────────────────────────────────
+// Estes dois métodos escrevem na tabela `transactions` (posse do módulo transaction)
+// DENTRO da mesma tx do registro de pagamento. É a exceção consciente da Opção A (igual
+// ao installment): a atomicidade cross-module (RF-PAGFAT-04) só é possível com uma única
+// transação — ports em módulos distintos rodariam em txs separadas.
+
+const insertPaymentTxnSQL = `
+INSERT INTO transactions
+	(id, title, description, amount, type, subcategory_id, payment_method, status,
+	 competence_date, payment_date, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?, 'realizado', ?,?,?,?)`
+
+func (r *SQLiteInvoicePaymentRepository) PayInvoiceAtomic(ctx context.Context, in AtomicPayInput) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("creditcard repo: pay atomic: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op após Commit
+
+	ts := in.Payment.CreatedAt.UTC().Format(time.RFC3339)
+
+	// 1. Baixa em lote: compras pendentes do ciclo → realizado, com a data informada.
+	if len(in.RealizeIDs) > 0 {
+		q := "UPDATE transactions SET status='realizado', payment_date=?, updated_at=? WHERE id IN (" +
+			placeholders(len(in.RealizeIDs)) + ")"
+		args := make([]any, 0, len(in.RealizeIDs)+2)
+		args = append(args, in.RealizeAt, ts)
+		for _, id := range in.RealizeIDs {
+			args = append(args, id)
+		}
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+			return fmt.Errorf("creditcard repo: pay atomic: realize: %w", err)
+		}
+	}
+
+	// 2. Lançamento de pagamento (realizado; sem cartão; type derivado da subcategoria).
+	p := in.Payment
+	if _, err := tx.ExecContext(ctx, insertPaymentTxnSQL,
+		p.ID, p.Title, toNullString(ptrVal(p.Description)), p.Amount, p.Type, p.SubcategoryID,
+		p.PaymentMethod, p.CompetenceDate, p.PaymentDate, ts, ts,
+	); err != nil {
+		return fmt.Errorf("creditcard repo: pay atomic: insert payment txn: %w", err)
+	}
+
+	// 3. Registro de pagamento da fatura, apontando para o lançamento criado.
+	if _, err := tx.ExecContext(ctx, upsertPaymentSQL,
+		in.CardID, in.Reference, p.PaymentDate, p.ID, ts,
+	); err != nil {
+		return fmt.Errorf("creditcard repo: pay atomic: upsert payment: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("creditcard repo: pay atomic: commit: %w", err)
+	}
+	return nil
+}
+
+func (r *SQLiteInvoicePaymentRepository) UndoPaymentAtomic(ctx context.Context, in AtomicUndoInput) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("creditcard repo: undo atomic: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op após Commit
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// 1. Compras realizadas do ciclo → pendente, limpando payment_date.
+	if len(in.RevertIDs) > 0 {
+		q := "UPDATE transactions SET status='pendente', payment_date=NULL, updated_at=? WHERE id IN (" +
+			placeholders(len(in.RevertIDs)) + ")"
+		args := make([]any, 0, len(in.RevertIDs)+1)
+		args = append(args, now)
+		for _, id := range in.RevertIDs {
+			args = append(args, id)
+		}
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+			return fmt.Errorf("creditcard repo: undo atomic: revert: %w", err)
+		}
+	}
+
+	// 2. Exclui o lançamento de pagamento criado no pay.
+	if in.PaymentTxnID != "" {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM transactions WHERE id = ?", in.PaymentTxnID); err != nil {
+			return fmt.Errorf("creditcard repo: undo atomic: delete payment txn: %w", err)
+		}
+	}
+
+	// 3. Remove o registro de pagamento da fatura.
+	res, err := tx.ExecContext(ctx,
+		"DELETE FROM credit_card_invoice_payments WHERE credit_card_id = ? AND reference = ?",
+		in.CardID, in.Reference)
+	if err != nil {
+		return fmt.Errorf("creditcard repo: undo atomic: delete payment: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrInvoiceNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("creditcard repo: undo atomic: commit: %w", err)
+	}
+	return nil
+}
+
+// placeholders devolve "?,?,...,?" com n interrogações para cláusulas IN parametrizadas.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
 // ─── Scan helpers ───────────────────────────────────────────────────────────
 
 type scanner interface {

@@ -7,9 +7,13 @@ import (
 	"github.com/local-finance-manager/backend/internal/shared"
 )
 
-// statusCancelado espelha transaction.StatusCancelado (string neutra no DTO).
+// Espelham os status de transaction (strings neutras no DTO shared.CardTransaction).
 // Compras canceladas não compõem fatura, total nem usedLimit.
-const statusCancelado = "cancelado"
+const (
+	statusPendente  = "pendente"
+	statusRealizado = "realizado"
+	statusCancelado = "cancelado"
+)
 
 // ─── Tipos de fatura ────────────────────────────────────────────────────────
 
