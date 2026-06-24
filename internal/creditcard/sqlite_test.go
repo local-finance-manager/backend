@@ -41,7 +41,17 @@ func newTestDB(t *testing.T) *sql.DB {
 		)`,
 		`CREATE TABLE transactions (
 			id TEXT PRIMARY KEY, title TEXT NOT NULL,
-			credit_card_id TEXT REFERENCES credit_cards(id) ON DELETE RESTRICT
+			description TEXT,
+			amount INTEGER NOT NULL DEFAULT 0,
+			type TEXT,
+			subcategory_id TEXT,
+			payment_method TEXT,
+			status TEXT NOT NULL DEFAULT 'pendente',
+			competence_date TEXT,
+			payment_date TEXT,
+			credit_card_id TEXT REFERENCES credit_cards(id) ON DELETE RESTRICT,
+			created_at TEXT,
+			updated_at TEXT
 		)`,
 	}
 	for _, s := range stmts {
@@ -345,5 +355,160 @@ func TestPaymentRepo_CascadeOnCardDelete(t *testing.T) {
 	m, _ := payRepo.ListByCard(ctx, "c1")
 	if len(m) != 0 {
 		t.Errorf("expected payments cascaded away, got %d", len(m))
+	}
+}
+
+// ─── Pagamento atômico de fatura (E1) ───────────────────────────────────────
+
+// insertCompra cria uma compra de cartão (lançamento) no estado informado.
+func insertCompra(t *testing.T, db *sql.DB, id, status string, amount int64) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO transactions (id, title, amount, type, subcategory_id, payment_method,
+			status, competence_date, credit_card_id, created_at, updated_at)
+		 VALUES (?, ?, ?, 'despesa', 'sub-x', 'cartao_credito', ?, '2026-06-20', 'c1', ?, ?)`,
+		id, id, amount, status, "2026-06-01T00:00:00Z", "2026-06-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("insert compra %s: %v", id, err)
+	}
+}
+
+func mkPaymentTxn(id string) creditcard.PaymentTxn {
+	return creditcard.PaymentTxn{
+		ID: id, Title: "Pagamento de Fatura — 2026-07", Amount: 30000,
+		Type: "transferencia", SubcategoryID: "sub-trf-pgto", PaymentMethod: "outros",
+		CompetenceDate: "2026-07-15", PaymentDate: "2026-07-15", CreatedAt: time.Now().UTC(),
+	}
+}
+
+func txnStatus(t *testing.T, db *sql.DB, id string) (status string, payDate sql.NullString) {
+	t.Helper()
+	if err := db.QueryRow("SELECT status, payment_date FROM transactions WHERE id = ?", id).
+		Scan(&status, &payDate); err != nil {
+		t.Fatalf("query status %s: %v", id, err)
+	}
+	return status, payDate
+}
+
+func TestInvoicePaymentRepo_PayInvoiceAtomic(t *testing.T) {
+	db := newTestDB(t)
+	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
+	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	ctx := context.Background()
+	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
+	insertCompra(t, db, "compra-1", "pendente", 20000)
+	insertCompra(t, db, "compra-2", "pendente", 10000)
+
+	err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{
+		CardID: "c1", Reference: "2026-07", RealizeIDs: []string{"compra-1", "compra-2"},
+		RealizeAt: "2026-07-15", Payment: mkPaymentTxn("pay-1"),
+	})
+	if err != nil {
+		t.Fatalf("PayInvoiceAtomic: %v", err)
+	}
+
+	// 1. compras realizadas com a data informada.
+	for _, id := range []string{"compra-1", "compra-2"} {
+		st, pd := txnStatus(t, db, id)
+		if st != "realizado" || pd.String != "2026-07-15" {
+			t.Errorf("compra %s: status=%s payment_date=%s", id, st, pd.String)
+		}
+	}
+	// 2. lançamento de pagamento criado (transferencia, realizado, sem cartão).
+	var typ, status string
+	var cardID sql.NullString
+	if err := db.QueryRow("SELECT type, status, credit_card_id FROM transactions WHERE id = 'pay-1'").
+		Scan(&typ, &status, &cardID); err != nil {
+		t.Fatalf("query payment txn: %v", err)
+	}
+	if typ != "transferencia" || status != "realizado" || cardID.Valid {
+		t.Errorf("payment txn inesperado: type=%s status=%s card=%v", typ, status, cardID)
+	}
+	// 3. registro de pagamento apontando para o lançamento.
+	rec, _ := payRepo.Get(ctx, "c1", "2026-07")
+	if rec == nil || rec.TransactionID == nil || *rec.TransactionID != "pay-1" {
+		t.Errorf("registro de pagamento inesperado: %+v", rec)
+	}
+}
+
+// TestInvoicePaymentRepo_PayInvoiceAtomic_Rollback força falha na inserção do lançamento de
+// pagamento (id duplicado) e prova que TUDO é revertido (RF-PAGFAT-04).
+func TestInvoicePaymentRepo_PayInvoiceAtomic_Rollback(t *testing.T) {
+	db := newTestDB(t)
+	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
+	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	ctx := context.Background()
+	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
+	insertCompra(t, db, "compra-1", "pendente", 20000)
+	insertCompra(t, db, "dup", "realizado", 5000) // id colide com o do lançamento de pagamento
+
+	err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{
+		CardID: "c1", Reference: "2026-07", RealizeIDs: []string{"compra-1"},
+		RealizeAt: "2026-07-15", Payment: mkPaymentTxn("dup"), // PRIMARY KEY conflict
+	})
+	if err == nil {
+		t.Fatal("esperava erro por id duplicado")
+	}
+	// rollback: compra-1 continua pendente, sem data; nenhum registro de pagamento.
+	st, pd := txnStatus(t, db, "compra-1")
+	if st != "pendente" || pd.Valid {
+		t.Errorf("rollback falhou: compra-1 status=%s payment_date=%v", st, pd)
+	}
+	if rec, _ := payRepo.Get(ctx, "c1", "2026-07"); rec != nil {
+		t.Errorf("registro de pagamento não deveria existir após rollback: %+v", rec)
+	}
+}
+
+func TestInvoicePaymentRepo_UndoPaymentAtomic(t *testing.T) {
+	db := newTestDB(t)
+	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
+	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	ctx := context.Background()
+	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
+	insertCompra(t, db, "compra-1", "pendente", 20000)
+	// pagar primeiro
+	if err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{
+		CardID: "c1", Reference: "2026-07", RealizeIDs: []string{"compra-1"},
+		RealizeAt: "2026-07-15", Payment: mkPaymentTxn("pay-1"),
+	}); err != nil {
+		t.Fatalf("pay: %v", err)
+	}
+
+	// desfazer
+	if err := payRepo.UndoPaymentAtomic(ctx, creditcard.AtomicUndoInput{
+		CardID: "c1", Reference: "2026-07", RevertIDs: []string{"compra-1"}, PaymentTxnID: "pay-1",
+	}); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+
+	// compra volta para pendente, sem data.
+	st, pd := txnStatus(t, db, "compra-1")
+	if st != "pendente" || pd.Valid {
+		t.Errorf("undo: compra-1 status=%s payment_date=%v", st, pd)
+	}
+	// lançamento de pagamento excluído.
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM transactions WHERE id = 'pay-1'").Scan(&n)
+	if n != 0 {
+		t.Errorf("lançamento de pagamento deveria ter sido excluído")
+	}
+	// registro de pagamento removido.
+	if rec, _ := payRepo.Get(ctx, "c1", "2026-07"); rec != nil {
+		t.Errorf("registro de pagamento deveria ter sido removido")
+	}
+}
+
+func TestInvoicePaymentRepo_UndoPaymentAtomic_NotFound(t *testing.T) {
+	db := newTestDB(t)
+	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
+	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	ctx := context.Background()
+	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
+
+	err := payRepo.UndoPaymentAtomic(ctx, creditcard.AtomicUndoInput{
+		CardID: "c1", Reference: "2026-07", PaymentTxnID: "x",
+	})
+	if err == nil {
+		t.Error("esperava ErrInvoiceNotFound quando não há registro de pagamento")
 	}
 }

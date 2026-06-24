@@ -105,7 +105,9 @@ func (f *fakeCardRepo) SetArchived(_ context.Context, id string, archived bool) 
 }
 
 type fakePayRepo struct {
-	data map[string]map[string]*InvoicePayment // cardID → reference → payment
+	data     map[string]map[string]*InvoicePayment // cardID → reference → payment
+	lastPay  *AtomicPayInput
+	lastUndo *AtomicUndoInput
 }
 
 func newFakePayRepo() *fakePayRepo {
@@ -140,6 +142,40 @@ func (f *fakePayRepo) Delete(_ context.Context, cardID, reference string) error 
 	}
 	delete(m, reference)
 	return nil
+}
+func (f *fakePayRepo) PayInvoiceAtomic(_ context.Context, in AtomicPayInput) error {
+	cp := in
+	f.lastPay = &cp
+	if f.data[in.CardID] == nil {
+		f.data[in.CardID] = map[string]*InvoicePayment{}
+	}
+	f.data[in.CardID][in.Reference] = &InvoicePayment{
+		Reference:     in.Reference,
+		PaymentDate:   in.Payment.PaymentDate,
+		TransactionID: &in.Payment.ID,
+		CreatedAt:     in.Payment.CreatedAt,
+	}
+	return nil
+}
+func (f *fakePayRepo) UndoPaymentAtomic(_ context.Context, in AtomicUndoInput) error {
+	cp := in
+	f.lastUndo = &cp
+	m, ok := f.data[in.CardID]
+	if !ok || m[in.Reference] == nil {
+		return ErrInvoiceNotFound
+	}
+	delete(m, in.Reference)
+	return nil
+}
+
+// fakeSubReader satisfaz SubcategoryReader (deriva o tipo do lançamento de pagamento).
+type fakeSubReader struct {
+	typ string
+	err error
+}
+
+func (f fakeSubReader) GetSubcategoryType(_ context.Context, _ string) (string, error) {
+	return f.typ, f.err
 }
 
 type fakeReader struct {
@@ -176,6 +212,14 @@ func cardTxn(id, competence string, amount int64) shared.CardTransaction {
 		CategoryID: "cat-1", CategoryName: "Cat 1", CategoryColor: "#fff", CreditCardID: "card-1",
 	}
 }
+
+func pendingTxn(id, competence string, amount int64) shared.CardTransaction {
+	t := cardTxn(id, competence, amount)
+	t.Status = "pendente"
+	return t
+}
+
+func strPtrCC(s string) *string { return &s }
 
 // ─── Create ─────────────────────────────────────────────────────────────────
 
@@ -456,24 +500,41 @@ func TestGetInvoice_NotFound(t *testing.T) {
 
 func TestPayInvoice_Success(t *testing.T) {
 	repo, pay, reader := payDeps(t)
-	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	inv, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15"})
+	// "past" (ref 2026-07) começa pendente → deve ser realizada na baixa em lote.
+	reader.txns["card-1"] = []shared.CardTransaction{
+		pendingTxn("past", "2026-06-20", 20000),
+		cardTxn("open", "2026-07-20", 30000),
+	}
+	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
+	inv, err := uc.Execute(context.Background(), PayInvoiceInput{
+		CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto",
+	})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if inv.Status != StatusPaga {
 		t.Errorf("status: got %s, want paga", inv.Status)
 	}
-	if pay.data["card-1"]["2026-07"] == nil {
-		t.Error("payment não persistido")
+	rec := pay.data["card-1"]["2026-07"]
+	if rec == nil || rec.TransactionID == nil || *rec.TransactionID == "" {
+		t.Fatalf("payment não persistido com transaction_id: %+v", rec)
+	}
+	// baixa em lote: a compra pendente do ciclo entrou em RealizeIDs.
+	if pay.lastPay == nil || len(pay.lastPay.RealizeIDs) != 1 || pay.lastPay.RealizeIDs[0] != "past" {
+		t.Errorf("RealizeIDs inesperados: %+v", pay.lastPay)
+	}
+	// lançamento de pagamento: transferência, valor = total da fatura, sem cartão.
+	p := pay.lastPay.Payment
+	if p.Type != "transferencia" || p.Amount != 20000 || p.PaymentMethod != "outros" {
+		t.Errorf("payment txn inesperado: %+v", p)
 	}
 }
 
 func TestPayInvoice_NotClosed(t *testing.T) {
 	repo, pay, reader := payDeps(t)
-	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
+	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
 	// 2026-08 está aberta
-	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-08", PaymentDate: "2026-07-20"})
+	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-08", PaymentDate: "2026-07-20", SubcategoryID: "sub-trf-pgto"})
 	if err != ErrInvoiceNotClosed {
 		t.Errorf("expected ErrInvoiceNotClosed, got %v", err)
 	}
@@ -482,8 +543,8 @@ func TestPayInvoice_NotClosed(t *testing.T) {
 func TestPayInvoice_AlreadyPaid(t *testing.T) {
 	repo, pay, reader := payDeps(t)
 	pay.Upsert(context.Background(), "card-1", InvoicePayment{Reference: "2026-07", PaymentDate: "2026-07-10"})
-	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15"})
+	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
+	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto"})
 	if err != ErrInvoiceAlreadyPaid {
 		t.Errorf("expected ErrInvoiceAlreadyPaid, got %v", err)
 	}
@@ -491,17 +552,26 @@ func TestPayInvoice_AlreadyPaid(t *testing.T) {
 
 func TestPayInvoice_InvalidDate(t *testing.T) {
 	repo, pay, reader := payDeps(t)
-	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "15/07/2026"})
+	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
+	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "15/07/2026", SubcategoryID: "sub-trf-pgto"})
 	if err == nil {
 		t.Error("expected invalid date error")
 	}
 }
 
+func TestPayInvoice_NoSubcategory(t *testing.T) {
+	repo, pay, reader := payDeps(t)
+	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
+	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15"})
+	if err == nil {
+		t.Error("expected error for missing subcategory")
+	}
+}
+
 func TestPayInvoice_NotFound(t *testing.T) {
 	repo, pay, reader := payDeps(t)
-	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2099-01", PaymentDate: "2026-07-15"})
+	uc := &payInvoiceImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
+	_, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2099-01", PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto"})
 	if err != ErrInvoiceNotFound {
 		t.Errorf("expected ErrInvoiceNotFound, got %v", err)
 	}
@@ -509,7 +579,7 @@ func TestPayInvoice_NotFound(t *testing.T) {
 
 func TestUndoInvoicePayment_Success(t *testing.T) {
 	repo, pay, reader := payDeps(t)
-	pay.Upsert(context.Background(), "card-1", InvoicePayment{Reference: "2026-07", PaymentDate: "2026-07-10"})
+	pay.Upsert(context.Background(), "card-1", InvoicePayment{Reference: "2026-07", PaymentDate: "2026-07-10", TransactionID: strPtrCC("pay-txn-1")})
 	uc := &undoInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
 	inv, err := uc.Execute(context.Background(), "card-1", "2026-07")
 	if err != nil {
@@ -520,6 +590,13 @@ func TestUndoInvoicePayment_Success(t *testing.T) {
 	}
 	if pay.data["card-1"]["2026-07"] != nil {
 		t.Error("pagamento deveria ter sido removido")
+	}
+	// reverte as compras realizadas do ciclo e exclui o lançamento de pagamento.
+	if pay.lastUndo == nil || pay.lastUndo.PaymentTxnID != "pay-txn-1" {
+		t.Errorf("undo não passou o PaymentTxnID: %+v", pay.lastUndo)
+	}
+	if len(pay.lastUndo.RevertIDs) != 1 || pay.lastUndo.RevertIDs[0] != "past" {
+		t.Errorf("RevertIDs inesperados: %+v", pay.lastUndo)
 	}
 }
 

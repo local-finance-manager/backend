@@ -43,14 +43,15 @@ func newTestDB(t *testing.T) *sql.DB {
 	}
 
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS subcategories (
-		id             TEXT PRIMARY KEY,
-		category_id    TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
-		name           TEXT NOT NULL,
-		icon           TEXT,
-		color          TEXT,
-		can_be_deleted INTEGER NOT NULL DEFAULT 1,
-		created_at     TEXT NOT NULL,
-		updated_at     TEXT NOT NULL
+		id                    TEXT PRIMARY KEY,
+		category_id           TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+		name                  TEXT NOT NULL,
+		icon                  TEXT,
+		color                 TEXT,
+		can_be_deleted        INTEGER NOT NULL DEFAULT 1,
+		is_balance_adjustment INTEGER NOT NULL DEFAULT 0,
+		created_at            TEXT NOT NULL,
+		updated_at            TEXT NOT NULL
 	)`)
 	if err != nil {
 		t.Fatalf("create subcategories: %v", err)
@@ -429,6 +430,81 @@ func insertTxn(t *testing.T, repo *transaction.SQLiteRepository, id, subID strin
 	txn := mkTransaction(id, id, subID, amount, typ, transaction.MethodPix, status, "2026-01-01", payDate)
 	if err := repo.Create(context.Background(), txn); err != nil {
 		t.Fatalf("insertTxn %s: %v", id, err)
+	}
+}
+
+// insertAdjustmentSub cria uma subcategoria de ajuste de saldo (transferencia,
+// is_balance_adjustment=1) para os testes do saldo acumulado (E6).
+func insertAdjustmentSub(t *testing.T, db *sql.DB, catID, subID, subName string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(`INSERT OR IGNORE INTO categories (id,name,type,can_be_deleted,created_at,updated_at)
+		VALUES (?,?,'transferencia',0,?,?)`, catID, "Transferências", now, now)
+	if err != nil {
+		t.Fatalf("insert cat %s: %v", catID, err)
+	}
+	_, err = db.Exec(`INSERT INTO subcategories (id,category_id,name,can_be_deleted,is_balance_adjustment,created_at,updated_at)
+		VALUES (?,?,?,0,1,?,?)`, subID, catID, subName, now, now)
+	if err != nil {
+		t.Fatalf("insert adjustment sub %s: %v", subID, err)
+	}
+}
+
+// TestTransactionRepo_GetSummary_SaldoAcumulado cobre E6/DB2: ajustes de saldo entram em
+// saldoInicial (não em receitas), e a fórmula saldoFinal = saldoInicial + saldoPeriodo vale
+// com e sem filtro de data (carryover de períodos anteriores).
+func TestTransactionRepo_GetSummary_SaldoAcumulado(t *testing.T) {
+	db := newTestDB(t)
+	insertTestSub(t, db, "cat-exp", "Despesas", "despesa", "sub-exp", "Aluguel")
+	insertTestSub(t, db, "cat-inc", "Receitas", "receita", "sub-inc", "Salário")
+	insertAdjustmentSub(t, db, "cat-trf", "sub-adj", "Saldo Inicial")
+	repo := transaction.NewSQLiteRepository(db)
+	ctx := context.Background()
+
+	mk := func(id, sub string, amt int64, typ transaction.TransactionType, comp string) {
+		txn := mkTransaction(id, id, sub, amt, typ, transaction.MethodPix,
+			transaction.StatusRealizado, comp, strPtr(comp))
+		if err := repo.Create(ctx, txn); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	mk("adj", "sub-adj", 1000000, transaction.TypeTransferencia, "2026-01-15") // Saldo Inicial R$10k
+	mk("exp-jan", "sub-exp", 50000, transaction.TypeDespesa, "2026-01-05")     // despesa em jan
+	mk("inc-feb", "sub-inc", 300000, transaction.TypeReceita, "2026-02-10")    // receita em fev
+	mk("exp-feb", "sub-exp", 100000, transaction.TypeDespesa, "2026-02-20")    // despesa em fev
+
+	// (A) Sem filtro de data: ajuste não infla receita; saldoInicial = ajustes; saldoFinal acumula.
+	a, err := repo.GetSummary(ctx, transaction.TransactionFilter{})
+	if err != nil {
+		t.Fatalf("summary A: %v", err)
+	}
+	if a.TotalReceitas != 300000 {
+		t.Errorf("A TotalReceitas: got %d, want 300000 (ajuste NÃO conta como receita)", a.TotalReceitas)
+	}
+	if a.SaldoPeriodo != 150000 { // 300000 - (50000+100000)
+		t.Errorf("A SaldoPeriodo: got %d, want 150000", a.SaldoPeriodo)
+	}
+	if a.SaldoInicial != 1000000 {
+		t.Errorf("A SaldoInicial: got %d, want 1000000", a.SaldoInicial)
+	}
+	if a.SaldoFinal != 1150000 { // 1000000 + 150000
+		t.Errorf("A SaldoFinal: got %d, want 1150000", a.SaldoFinal)
+	}
+
+	// (B) Filtrando fevereiro: carryover = despesa de jan (-50000); ajuste (jan) entra até `to`.
+	from, to := "2026-02-01", "2026-02-28"
+	b, err := repo.GetSummary(ctx, transaction.TransactionFilter{CompetenceDateFrom: &from, CompetenceDateTo: &to})
+	if err != nil {
+		t.Fatalf("summary B: %v", err)
+	}
+	if b.SaldoPeriodo != 200000 { // 300000 - 100000 (só fev)
+		t.Errorf("B SaldoPeriodo: got %d, want 200000", b.SaldoPeriodo)
+	}
+	if b.SaldoInicial != 950000 { // carryover -50000 + ajustes 1000000
+		t.Errorf("B SaldoInicial: got %d, want 950000", b.SaldoInicial)
+	}
+	if b.SaldoFinal != 1150000 { // mesmo saldo acumulado final de (A) — invariante
+		t.Errorf("B SaldoFinal: got %d, want 1150000", b.SaldoFinal)
 	}
 }
 

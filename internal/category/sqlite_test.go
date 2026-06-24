@@ -43,14 +43,15 @@ func newTestDB(t *testing.T) *sql.DB {
 	}
 
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS subcategories (
-		id             TEXT PRIMARY KEY,
-		category_id    TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
-		name           TEXT NOT NULL,
-		icon           TEXT,
-		color          TEXT,
-		can_be_deleted INTEGER NOT NULL DEFAULT 1,
-		created_at     TEXT NOT NULL,
-		updated_at     TEXT NOT NULL
+		id                    TEXT PRIMARY KEY,
+		category_id           TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+		name                  TEXT NOT NULL,
+		icon                  TEXT,
+		color                 TEXT,
+		can_be_deleted        INTEGER NOT NULL DEFAULT 1,
+		is_balance_adjustment INTEGER NOT NULL DEFAULT 0,
+		created_at            TEXT NOT NULL,
+		updated_at            TEXT NOT NULL
 	)`)
 	if err != nil {
 		t.Fatalf("create subcategories: %v", err)
@@ -506,5 +507,58 @@ func TestCategoryRepo_ListWithEndDate(t *testing.T) {
 	}
 	if len(cats) != 1 || cats[0].ID != "cat-old" {
 		t.Errorf("expected only cat-old, got %+v", cats)
+	}
+}
+
+// TestSubcategoryRepo_IsBalanceAdjustment cobre o flag E6 (RF-SALDO-04): subcategorias
+// criadas pelo usuário nascem com flag false; subcategorias de ajuste (do seed) fazem
+// round-trip true e o Update não altera o flag (imutável).
+func TestSubcategoryRepo_IsBalanceAdjustment(t *testing.T) {
+	db := newTestDB(t)
+	catRepo := category.NewSQLiteCategoryRepository(db)
+	subRepo := category.NewSQLiteSubcategoryRepository(db)
+	ctx := context.Background()
+
+	catRepo.Create(ctx, mkCat("cat-trf", "Transferências", category.Transfer, false))
+
+	// Subcategoria comum criada via repo → flag false (D6).
+	if err := subRepo.Create(ctx, mkSub("sub-comum", "cat-trf", "Comum", true)); err != nil {
+		t.Fatalf("create comum: %v", err)
+	}
+	got, err := subRepo.Get(ctx, "sub-comum")
+	if err != nil {
+		t.Fatalf("get comum: %v", err)
+	}
+	if got.IsBalanceAdjustment {
+		t.Errorf("subcategoria comum não deveria ser ajuste de saldo")
+	}
+
+	// Subcategoria de ajuste (simula o seed) → round-trip true.
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(
+		`INSERT INTO subcategories (id, category_id, name, can_be_deleted, is_balance_adjustment, created_at, updated_at)
+		 VALUES ('sub-ajuste', 'cat-trf', 'Saldo Inicial', 0, 1, ?, ?)`, now, now,
+	); err != nil {
+		t.Fatalf("insert ajuste: %v", err)
+	}
+	adj, err := subRepo.Get(ctx, "sub-ajuste")
+	if err != nil {
+		t.Fatalf("get ajuste: %v", err)
+	}
+	if !adj.IsBalanceAdjustment {
+		t.Errorf("subcategoria de ajuste deveria ter IsBalanceAdjustment=true")
+	}
+
+	// Update não toca o flag (imutável — RF-SALDO-04).
+	adj.Name = "Saldo Inicial (editado)"
+	if err := subRepo.Update(ctx, adj); err != nil {
+		t.Fatalf("update ajuste: %v", err)
+	}
+	after, err := subRepo.Get(ctx, "sub-ajuste")
+	if err != nil {
+		t.Fatalf("get após update: %v", err)
+	}
+	if !after.IsBalanceAdjustment {
+		t.Errorf("flag deveria permanecer true após update")
 	}
 }
