@@ -2,6 +2,16 @@ BINARY    = bin/server
 MAIN      = ./cmd/server
 MODULE    = github.com/local-finance-manager/backend
 
+# Pacotes de negócio medidos pela cobertura. Excluídos por natureza (não unit-testáveis):
+#   cmd/server (Composition Root / wiring) e database/config/middleware (sem lógica de
+#   negócio). O backup é coberto inclusive no adapter do Drive (mock httptest) e no fluxo
+#   OAuth Authorize (loopback + endpoint de token mockado).
+COVER_PKGS = ./internal/backup/... ./internal/category/... ./internal/creditcard/... \
+             ./internal/installment/... ./internal/shared/... ./internal/transaction/...
+
+# Piso de cobertura exigido por módulo.
+COVER_MIN = 90
+
 .PHONY: all setup build run dev test cover lint clean
 
 all: build
@@ -27,16 +37,19 @@ dev:
 test:
 	go test -race -cover ./...
 
-## cover: run tests with coverage report; fails if total coverage < 85%
+## cover: run tests with coverage; fails if ANY module is below COVER_MIN% (per módulo)
 cover:
-	@go test -race -coverprofile=coverage.out -covermode=atomic ./...
-	@go tool cover -func=coverage.out
-	@TOTAL=$$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $$3}' | tr -d '%'); \
-	  echo "Total coverage: $${TOTAL}%"; \
-	  if [ "$$(echo "$${TOTAL} < 85" | bc)" -eq 1 ]; then \
-	    echo "FAIL: coverage $${TOTAL}% below 85% minimum"; exit 1; \
+	@echo "Cobertura por módulo (mínimo $(COVER_MIN)%):"; \
+	fail=0; \
+	for pkg in $(COVER_PKGS); do \
+	  pct=$$(go test -race -covermode=atomic -cover $$pkg 2>/dev/null | grep -o 'coverage: [0-9.]*%' | grep -o '[0-9.]*'); \
+	  printf "  %-32s %6s%%\n" "$$pkg" "$$pct"; \
+	  if [ -z "$$pct" ] || [ "$$(echo "$$pct < $(COVER_MIN)" | bc)" -eq 1 ]; then \
+	    echo "  FAIL: $$pkg abaixo de $(COVER_MIN)%"; fail=1; \
 	  fi; \
-	  echo "PASS: coverage $${TOTAL}% meets 85% threshold"
+	done; \
+	if [ $$fail -eq 1 ]; then exit 1; fi; \
+	echo "PASS: todos os módulos >= $(COVER_MIN)%"
 
 ## lint: run linter (requires: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)
 lint:

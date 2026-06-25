@@ -1,6 +1,7 @@
 package backup_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -64,5 +65,21 @@ func TestFileStateStore_Overwrite(t *testing.T) {
 	got, _ := store.Load()
 	if got.LatestFileID != "second" {
 		t.Errorf("got %q, want second", got.LatestFileID)
+	}
+}
+
+func TestFileStateStore_ErrorPaths(t *testing.T) {
+	// Save com diretório inexistente → erro ao escrever o tmp
+	bad := backup.NewFileStateStore(filepath.Join(t.TempDir(), "sem", "dir", "state.json"))
+	if err := bad.Save(backup.BackupState{}); err == nil {
+		t.Error("Save deveria falhar com diretório inexistente")
+	}
+	// Load com json malformado → erro
+	p := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(p, []byte("{nao-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.NewFileStateStore(p).Load(); err == nil {
+		t.Error("Load deveria falhar com json malformado")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -114,5 +115,50 @@ func TestIsOffline(t *testing.T) {
 				t.Errorf("isOffline(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFileUtil_ErrorPaths(t *testing.T) {
+	ctx := context.Background()
+	missing := filepath.Join(t.TempDir(), "nao-existe.bin")
+
+	if _, _, _, err := hashFileBoth(missing); err == nil {
+		t.Error("hashFileBoth deveria falhar com arquivo inexistente")
+	}
+	if err := copyFile(missing, filepath.Join(t.TempDir(), "dst")); err == nil {
+		t.Error("copyFile deveria falhar com origem inexistente")
+	}
+	// destino inválido (diretório inexistente)
+	badDst := filepath.Join(t.TempDir(), "sem", "dir", "dst")
+	if _, _, err := writeAndHashSHA(badDst, strings.NewReader("x")); err == nil {
+		t.Error("writeAndHashSHA deveria falhar com destino inválido")
+	}
+	// integrity_check em arquivo que não é sqlite válido
+	garbage := filepath.Join(t.TempDir(), "garbage.sqlite")
+	if err := os.WriteFile(garbage, []byte("not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := integrityCheck(ctx, garbage); err == nil {
+		t.Error("integrityCheck deveria falhar com arquivo inválido")
+	}
+}
+
+func TestIsOffline_NetAndCanceled(t *testing.T) {
+	if !isOffline(context.Canceled) {
+		t.Error("context.Canceled deveria ser offline")
+	}
+	if !isOffline(&net.DNSError{Err: "timeout", Name: "x", IsTimeout: true}) {
+		t.Error("net.Error (DNSError) deveria ser offline")
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read falhou") }
+
+func TestWriteAndHashSHA_ReadError(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "out.bin")
+	if _, _, err := writeAndHashSHA(dst, errReader{}); err == nil {
+		t.Error("writeAndHashSHA deveria falhar quando o reader falha")
 	}
 }

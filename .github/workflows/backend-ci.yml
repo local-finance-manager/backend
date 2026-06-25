@@ -63,29 +63,30 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Run tests with coverage
-        # Packages without test files (cmd/server, database, config, middleware)
-        # cause a "no such tool covdata" error in Go 1.25 when coverage is enabled.
-        # Handler and routes are intentionally excluded from automated tests (manual
-        # integration testing covers them per guia-tecnico §11.2), which caps
-        # achievable coverage at ~65%. Threshold is set accordingly.
+      - name: Enforce minimum coverage per module (90%)
+        # Cada pacote de negócio (domínio + serviço + repositório + handlers/rotas) deve ter
+        # >= 90%. Os handlers/rotas são cobertos por testes de integração httptest + :memory:;
+        # o adapter do Drive por um mock httptest; o OAuth Authorize via loopback + endpoint de
+        # token mockado. Excluídos por natureza: cmd/server (wiring) e database/config/middleware.
         run: |
-          go test -coverprofile=coverage.out -covermode=atomic \
+          MIN=90
+          fail=0
+          for pkg in \
+            ./internal/backup/... \
             ./internal/category/... \
-            ./internal/shared/...
-
-      - name: Coverage report per package
-        run: go tool cover -func=coverage.out
-
-      - name: Enforce minimum coverage (60%)
-        run: |
-          TOTAL=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
-          echo "Total coverage: ${TOTAL}%"
-          if [ "$(echo "${TOTAL} < 60" | bc)" -eq 1 ]; then
-            echo "::error::Coverage ${TOTAL}% is below the 60% minimum threshold"
-            exit 1
-          fi
-          echo "Coverage ${TOTAL}% meets the threshold ✓"
+            ./internal/creditcard/... \
+            ./internal/installment/... \
+            ./internal/shared/... \
+            ./internal/transaction/...; do
+            pct=$(go test -covermode=atomic -cover "$pkg" 2>/dev/null | grep -o 'coverage: [0-9.]*%' | grep -o '[0-9.]*')
+            printf '%-32s %6s%%\n' "$pkg" "$pct"
+            if [ -z "$pct" ] || [ "$(echo "$pct < $MIN" | bc)" -eq 1 ]; then
+              echo "::error::$pkg coverage ${pct}% is below the ${MIN}% per-module minimum"
+              fail=1
+            fi
+          done
+          if [ "$fail" -eq 1 ]; then exit 1; fi
+          echo "Todos os módulos >= ${MIN}% ✓"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
