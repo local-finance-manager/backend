@@ -92,7 +92,7 @@ func runAutosave(ctx context.Context, svc *backup.Service, interval time.Duratio
 			return
 		case <-ticker.C:
 			actx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if _, err := svc.Backup(actx); err != nil {
+			if _, err := svc.Run(actx); err != nil { // dois tiers (Drive + local), só-se-mudou
 				log.Warn("autosave", "error", err)
 			}
 			cancel()
@@ -246,8 +246,9 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// D14: autosave periódico (se habilitado e intervalo > 0).
-	if backupEnabled && cfg.Backup.AutosaveInterval > 0 {
+	// Autosave periódico (RF-BKP-17): roda se o intervalo > 0 e houver ALGUM tier ativo —
+	// Drive habilitado OU o tier de snapshot local (que independe do Drive).
+	if cfg.Backup.AutosaveInterval > 0 && (backupEnabled || cfg.Backup.LocalSnapshotEnabled) {
 		go runAutosave(ctx, backupSvc, time.Duration(cfg.Backup.AutosaveInterval)*time.Minute, log)
 	}
 

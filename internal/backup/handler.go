@@ -37,11 +37,22 @@ type restoreReq struct {
 	Confirm   bool   `json:"confirm"`
 }
 
+type restoreLocalReq struct {
+	Snapshot string `json:"snapshot"`
+	Confirm  bool   `json:"confirm"`
+}
+
+type localSnapshotResp struct {
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+	Size      int64  `json:"size"`
+}
+
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
-// Backup trata POST /api/backup
+// Backup trata POST /api/backup — roda os dois tiers (Drive + local), só-se-mudou.
 func (h *Handler) Backup(w http.ResponseWriter, r *http.Request) {
-	res, err := h.svc.Backup(r.Context())
+	res, err := h.svc.Run(r.Context())
 	if err != nil {
 		h.writeErr(w, err)
 		return
@@ -92,6 +103,41 @@ func (h *Handler) Restore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 	if res.RestartRequired {
 		h.svc.Restart() // agenda os.Exit; a resposta acima já foi enviada
+	}
+}
+
+// ListLocalSnapshots trata GET /api/backup/local-snapshots (RF-BKP-18).
+func (h *Handler) ListLocalSnapshots(w http.ResponseWriter, r *http.Request) {
+	p := shared.ParsePagination(r, backupPaginationDefaults, backupAllowedOrderBy)
+	result, err := h.svc.ListLocalSnapshots(r.Context(), p)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	data := make([]localSnapshotResp, len(result.Data))
+	for i, sn := range result.Data {
+		data[i] = localSnapshotResp{
+			Name: sn.Name, CreatedAt: sn.CreatedAt.UTC().Format(time.RFC3339), Size: sn.Size,
+		}
+	}
+	writeJSON(w, http.StatusOK, shared.PagedResult[localSnapshotResp]{Data: data, Pagination: result.Pagination})
+}
+
+// RestoreLocal trata POST /api/backup/restore-local. Responde e SÓ ENTÃO reinicia (D7).
+func (h *Handler) RestoreLocal(w http.ResponseWriter, r *http.Request) {
+	var req restoreLocalReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		domainerr.WriteError(w, domainerr.NewBadRequest("corpo da requisição inválido", domainerr.WithDisplayable()))
+		return
+	}
+	res, err := h.svc.RestoreLocal(r.Context(), req.Snapshot, req.Confirm)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+	if res.RestartRequired {
+		h.svc.Restart()
 	}
 }
 

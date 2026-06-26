@@ -233,7 +233,12 @@ func validSQLiteBytes(t *testing.T) []byte {
 // ─── Disabled ───────────────────────────────────────────────────────────────
 
 func TestService_Disabled(t *testing.T) {
-	svc := backup.NewService(backup.Deps{Enabled: false, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	svc := backup.NewService(backup.Deps{
+		Enabled: false,
+		Cfg:     config.BackupConfig{DataDir: t.TempDir()},
+		Store:   &fakeStore{},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	ctx := context.Background()
 
 	if _, err := svc.Backup(ctx); err != backup.ErrBackupDisabled {

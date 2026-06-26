@@ -57,19 +57,10 @@ func TestAuthorize_ContextCancelled(t *testing.T) {
 	}
 }
 
-// TestAuthorize_HappyPath cobre o fluxo completo: captura o state do authURL impresso,
-// dispara um callback válido com code e troca por token num endpoint mockado.
-func TestAuthorize_HappyPath(t *testing.T) {
-	tokSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600}`))
-	}))
-	defer tokSrv.Close()
-
-	conf := &oauth2.Config{
-		ClientID: "id", ClientSecret: "sec", RedirectURL: authCallbackURL,
-		Endpoint: oauth2.Endpoint{AuthURL: "http://auth.example", TokenURL: tokSrv.URL},
-	}
+// authorizeRoundtrip roda Authorize, captura o state do authURL impresso e dispara um callback
+// (query montada por queryFor). Sai cedo se Authorize retornar antes (ex.: a porta loopback fixa
+// 19743 ainda em TIME_WAIT de outro teste → erro de listen). Devolve o resultado do Authorize.
+func authorizeRoundtrip(conf *oauth2.Config, queryFor func(state string) string) (*oauth2.Token, error) {
 	pr := &capturePrinter{}
 	type result struct {
 		tok *oauth2.Token
@@ -81,46 +72,71 @@ func TestAuthorize_HappyPath(t *testing.T) {
 		done <- result{tok, err}
 	}()
 
-	// captura o state do authURL impresso
 	var state string
-	for i := 0; i < 100 && state == ""; i++ {
+	for i := 0; i < 200 && state == ""; i++ {
+		select {
+		case r := <-done:
+			return r.tok, r.err // Authorize retornou cedo (provável erro de listen)
+		default:
+		}
 		if u, err := url.Parse(pr.authURL()); err == nil {
 			state = u.Query().Get("state")
 		}
 		if state == "" {
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	if state == "" {
-		t.Fatal("não capturou o state do authURL")
+		return nil, fmt.Errorf("não capturou o state")
 	}
 
-	// dispara o callback válido (state correto + code)
-	var ok bool
 	for i := 0; i < 100; i++ {
-		resp, err := http.Get(authCallbackURL + "?state=" + state + "&code=fake-code")
-		if err == nil {
+		select {
+		case r := <-done:
+			return r.tok, r.err
+		default:
+		}
+		if resp, err := http.Get(authCallbackURL + queryFor(state)); err == nil {
 			resp.Body.Close()
-			ok = true
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !ok {
-		t.Fatal("callback não respondeu")
-	}
-
 	select {
-	case res := <-done:
-		if res.err != nil {
-			t.Fatalf("Authorize: %v", res.err)
-		}
-		if res.tok == nil || res.tok.RefreshToken != "rt" {
-			t.Errorf("token inesperado: %+v", res.tok)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Authorize não retornou após o callback válido")
+	case r := <-done:
+		return r.tok, r.err
+	case <-time.After(3 * time.Second):
+		return nil, fmt.Errorf("Authorize não retornou após o callback")
 	}
+}
+
+// TestAuthorize_HappyPath cobre o fluxo completo: state capturado + callback válido + troca de
+// token num endpoint mockado. Retry porque a porta loopback é fixa (TIME_WAIT entre testes).
+func TestAuthorize_HappyPath(t *testing.T) {
+	tokSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokSrv.Close()
+	conf := &oauth2.Config{
+		ClientID: "id", ClientSecret: "sec", RedirectURL: authCallbackURL,
+		Endpoint: oauth2.Endpoint{AuthURL: "http://auth.example", TokenURL: tokSrv.URL},
+	}
+	query := func(state string) string { return "?state=" + state + "&code=fake-code" }
+
+	var lastErr error
+	for attempt := 0; attempt < 50; attempt++ {
+		tok, err := authorizeRoundtrip(conf, query)
+		if err == nil {
+			if tok == nil || tok.RefreshToken != "rt" {
+				t.Errorf("token inesperado: %+v", tok)
+			}
+			return
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("Authorize não completou após retries: %v", lastErr)
 }
 
 // TestAuthorize_ListenError cobre o ramo de erro quando a porta de loopback está ocupada.
@@ -136,36 +152,22 @@ func TestAuthorize_ListenError(t *testing.T) {
 	}
 }
 
-// TestAuthorize_StateMismatch cobre o handler de callback (state inválido) + o ramo errCh.
+// TestAuthorize_StateMismatch cobre o handler de callback (state inválido). Retry até a porta
+// liberar e o Authorize de fato alcançar o handler (erro "state mismatch", não de listen).
 func TestAuthorize_StateMismatch(t *testing.T) {
 	conf := &oauth2.Config{RedirectURL: authCallbackURL, Endpoint: oauth2.Endpoint{AuthURL: "http://auth.example"}}
-	done := make(chan error, 1)
-	go func() {
-		_, err := backup.Authorize(context.Background(), conf, nopPrinter{})
-		done <- err
-	}()
-	// aguarda o servidor de loopback subir e dispara um callback com state inválido
-	var ok bool
-	for i := 0; i < 100; i++ {
-		resp, err := http.Get(authCallbackURL + "?state=errado")
-		if err == nil {
-			resp.Body.Close()
-			ok = true
-			break
+	query := func(string) string { return "?state=errado" }
+
+	var lastErr error
+	for attempt := 0; attempt < 50; attempt++ {
+		_, err := authorizeRoundtrip(conf, query)
+		if err != nil && strings.Contains(err.Error(), "state mismatch") {
+			return // alcançou o handler de callback (ramo de state inválido)
 		}
-		time.Sleep(20 * time.Millisecond)
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
 	}
-	if !ok {
-		t.Fatal("servidor de callback não respondeu")
-	}
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Error("esperava erro de state inválido")
-		}
-	case <-time.After(3 * time.Second):
-		t.Error("Authorize não retornou após o callback")
-	}
+	t.Fatalf("Authorize não retornou erro de state mismatch: %v", lastErr)
 }
 
 func TestLoadToken_Missing(t *testing.T) {

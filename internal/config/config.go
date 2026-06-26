@@ -39,6 +39,10 @@ type BackupConfig struct {
 	AutosaveInterval int    // minutos; 0 = desabilitado
 	DataDir          string // dir do banco — sidecar, snapshots, safety backups
 	TokenPath        string // ~/.config/financas/token.json (volume montado)
+
+	// Tier de snapshot local (independe do Drive) — RF-BKP-18.
+	LocalSnapshotEnabled   bool
+	LocalSnapshotRetention int // nº de snapshots locais datados a manter; 0 = desliga o tier
 }
 
 // Addr returns the TCP address the server should listen on.
@@ -84,9 +88,13 @@ func loadBackup(b *BackupConfig, dbPath string) {
 	b.RefreshToken = os.Getenv("DRIVE_REFRESH_TOKEN")
 	b.FolderName = getenvDefault("DRIVE_FOLDER_NAME", "Financas")
 	b.LatestFilename = getenvDefault("DRIVE_LATEST_FILENAME", "financas-latest.sqlite")
-	b.Retention = atoiDefault(os.Getenv("DRIVE_BACKUP_RETENTION"), 30)
-	b.AutosaveInterval = atoiDefault(os.Getenv("BACKUP_AUTOSAVE_INTERVAL"), 0)
+	b.Retention = atoiDefault(os.Getenv("DRIVE_BACKUP_RETENTION"), 5)           // RF-BKP-15 (era 30)
+	b.AutosaveInterval = atoiDefault(os.Getenv("BACKUP_AUTOSAVE_INTERVAL"), 15) // RF-BKP-17 (era 0)
 	b.DataDir = filepath.Dir(dbPath)
+
+	// Tier de snapshot local — ligado por padrão, retenção 5 (RF-BKP-18 / RNF-BKP2-04).
+	b.LocalSnapshotEnabled = getenvDefault("LOCAL_SNAPSHOT_ENABLED", "true") == "true"
+	b.LocalSnapshotRetention = atoiDefault(os.Getenv("LOCAL_SNAPSHOT_RETENTION"), 5)
 
 	if path := os.Getenv("DRIVE_TOKEN_PATH"); path != "" {
 		b.TokenPath = path

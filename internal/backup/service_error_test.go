@@ -59,15 +59,24 @@ func TestService_Backup_SnapshotError(t *testing.T) {
 	}
 }
 
-// TestService_Status_Disabled cobre o ramo desabilitado do Status.
+// TestService_Status_Disabled cobre o ramo Drive-desabilitado do Status: SyncEnabled false,
+// mas o tier local continua reportado (RF-BKP-19).
 func TestService_Status_Disabled(t *testing.T) {
-	svc := backup.NewService(backup.Deps{Enabled: false, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	svc := backup.NewService(backup.Deps{
+		Enabled: false,
+		Cfg:     config.BackupConfig{DataDir: t.TempDir(), LocalSnapshotEnabled: true},
+		Store:   &fakeStore{},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	st, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	if st.SyncEnabled {
-		t.Error("SyncEnabled deveria ser false quando desabilitado")
+		t.Error("SyncEnabled deveria ser false quando o Drive está desabilitado")
+	}
+	if !st.LocalSnapshotsEnabled {
+		t.Error("LocalSnapshotsEnabled deveria ser true (tier local independe do Drive)")
 	}
 }
 

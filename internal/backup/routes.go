@@ -9,5 +9,7 @@ func Routes(h *Handler) func(chi.Router) {
 		r.Get("/status", h.Status)
 		r.Get("/versions", h.ListVersions)
 		r.Post("/restore", h.Restore)
+		r.Get("/local-snapshots", h.ListLocalSnapshots)
+		r.Post("/restore-local", h.RestoreLocal)
 	}
 }

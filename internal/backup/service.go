@@ -151,6 +151,55 @@ func (s *Service) Backup(ctx context.Context) (BackupResult, error) {
 	}, nil
 }
 
+// Run executa um ciclo nos dois tiers (Drive + local), cada um só-se-mudou (RF-BKP-16) e
+// best-effort ENTRE si: Drive offline NÃO impede o snapshot local (RF-BKP-18 / DA4). É o ponto
+// de entrada dos três gatilhos (Ctrl+S, autosave, shutdown).
+//
+// Concorrência (DA4): Run NÃO segura s.mu — chama Backup e SnapshotLocal em sequência, cada um
+// adquirindo s.mu por conta própria (Go não tem mutex reentrante).
+func (s *Service) Run(ctx context.Context) (BackupResult, error) {
+	driveOn := s.enabled
+	localOn := s.cfg.LocalSnapshotEnabled
+	if !driveOn && !localOn {
+		return BackupResult{State: StateIdle}, ErrBackupDisabled
+	}
+
+	var driveRes BackupResult
+	var driveErr error
+	if driveOn {
+		driveRes, driveErr = s.Backup(ctx)
+	}
+
+	var localRes LocalResult
+	var localErr error
+	if localOn {
+		if localRes, localErr = s.SnapshotLocal(ctx); localErr != nil {
+			s.log.Warn("backup: snapshot local falhou", "error", localErr)
+		}
+	}
+
+	if driveOn {
+		// Erro do Drive só vira erro do Run se NÃO houve rede de segurança local que tenha
+		// salvado — preserva o 503/erro de hoje quando não existe fallback local.
+		if driveErr != nil && (!localOn || localErr != nil) {
+			return driveRes, driveErr
+		}
+		return driveRes, nil
+	}
+
+	// Só o tier local: sintetiza um BackupResult para manter a resposta compatível (DA4).
+	if localErr != nil {
+		return BackupResult{State: StateError}, localErr
+	}
+	return BackupResult{
+		Uploaded:  localRes.Created,
+		Unchanged: localRes.Unchanged,
+		BackupAt:  localRes.At,
+		Size:      localRes.Size,
+		State:     StateIdle,
+	}, nil
+}
+
 type fileReader = *os.File
 
 // uploadFromFile abre o snapshot e passa o reader para a função de upload (cada upload
@@ -239,26 +288,35 @@ func driveCallErr(stage string, err error) error {
 // ─── Status (RF-BKP-09/12) ──────────────────────────────────────────────────
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
-	if !s.enabled {
-		return Status{SyncEnabled: false, State: StateIdle}, nil
-	}
 	state, err := s.store.Load()
 	if err != nil {
 		return Status{}, err
 	}
+
+	// Tier local (RF-BKP-19): sempre reportado, mesmo com o Drive desabilitado.
 	st := Status{
-		SyncEnabled:        true,
-		State:              StateIdle,
-		LastBackupSize:     state.LastBackupSize,
-		LastChecksumSHA256: state.LastChecksumSHA256,
-		DriveFolderID:      state.DriveFolderID,
-		LastError:          state.LastError,
+		State:                 StateIdle,
+		LocalSnapshotsEnabled: s.cfg.LocalSnapshotEnabled,
+		LocalSnapshotCount:    s.localSnapshotCount(),
 	}
+	if !state.LocalLastSnapshotAt.IsZero() {
+		t := state.LocalLastSnapshotAt
+		st.LocalLastSnapshotAt = &t
+	}
+
+	if !s.enabled {
+		return st, nil // Drive desligado; só o tier local
+	}
+
+	st.SyncEnabled = true
+	st.LastBackupSize = state.LastBackupSize
+	st.LastChecksumSHA256 = state.LastChecksumSHA256
+	st.DriveFolderID = state.DriveFolderID
+	st.LastError = state.LastError
 	if !state.LastBackupAt.IsZero() {
 		t := state.LastBackupAt
 		st.LastBackupAt = &t
 	}
-
 	if dirty, derr := s.computeDirty(ctx, state.LastChecksumSHA256); derr == nil {
 		st.IsDirty = dirty
 		if dirty {
@@ -269,6 +327,15 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		st.State = StateError
 	}
 	return st, nil
+}
+
+// localSnapshotCount conta os snapshots locais válidos (0 em erro/dir inexistente).
+func (s *Service) localSnapshotCount() int {
+	snaps, err := listLocalSnapshots(s.snapshotsDir())
+	if err != nil {
+		return 0
+	}
+	return len(snaps)
 }
 
 // computeDirty gera um snapshot e compara o checksum com o último backup (D8).
@@ -406,10 +473,10 @@ func (s *Service) Restart() {
 // ─── BackupBestEffort (shutdown — RF-BKP-06/D15) ────────────────────────────
 
 func (s *Service) BackupBestEffort(ctx context.Context) {
-	if !s.enabled {
+	if !s.enabled && !s.cfg.LocalSnapshotEnabled {
 		return
 	}
-	res, err := s.Backup(ctx)
+	res, err := s.Run(ctx) // cobre os dois tiers no shutdown (RF-BKP-16/18)
 	if err != nil {
 		s.log.Warn("backup: shutdown best-effort failed", "error", err)
 		return

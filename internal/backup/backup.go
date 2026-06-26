@@ -33,6 +33,10 @@ type BackupState struct {
 	LastBackupSize     int64     `json:"lastBackupSize"`
 	LastError          *string   `json:"lastError"`
 	Versions           []Version `json:"versions"`
+
+	// Tier local (RF-BKP-18) — baseline do no-op local, independente do Drive.
+	LocalLastChecksumSHA256 string    `json:"localLastChecksumSHA256"`
+	LocalLastSnapshotAt     time.Time `json:"localLastSnapshotAt"`
 }
 
 // Version é uma cópia datada no Drive.
@@ -65,6 +69,18 @@ type Status struct {
 	DriveFolderID      string     `json:"drive_folder_id"`
 	RemoteNewer        bool       `json:"remote_newer"`
 	LastError          *string    `json:"last_error"`
+
+	// Tier de snapshot local (RF-BKP-19) — aditivo, snake_case (consistência do módulo).
+	LocalSnapshotsEnabled bool       `json:"local_snapshots_enabled"`
+	LocalLastSnapshotAt   *time.Time `json:"local_last_snapshot_at"`
+	LocalSnapshotCount    int        `json:"local_snapshot_count"`
+}
+
+// LocalSnapshot é um snapshot local datado (resposta de GET /api/backup/local-snapshots).
+type LocalSnapshot struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	Size      int64     `json:"size"`
 }
 
 // BackupResult é a resposta de POST /api/backup.
@@ -101,6 +117,10 @@ var (
 		"restauração exige confirmação explícita", domainerr.WithDisplayable())
 	ErrVersionNotFound = domainerr.NewNotFound(
 		"versão de backup não encontrada", domainerr.WithDisplayable())
+	ErrSnapshotNotFound = domainerr.NewNotFound(
+		"snapshot local não encontrado", domainerr.WithDisplayable())
+	ErrInvalidSnapshotName = domainerr.NewBadRequest(
+		"nome de snapshot inválido", domainerr.WithDisplayable())
 )
 
 // ─── Regras puras (testáveis sem I/O) ───────────────────────────────────────
@@ -141,4 +161,24 @@ func IsRemoteNewer(remoteModified, localLastBackup time.Time, skew time.Duration
 // Usa '-' no lugar de ':' (caractere inválido em nome de arquivo).
 func DatedFilename(prefix string, t time.Time) string {
 	return fmt.Sprintf("%s-%s.sqlite", prefix, t.UTC().Format("2006-01-02T15-04-05Z"))
+}
+
+// LocalSnapshotsToPrune devolve os nomes de snapshots locais a remover para respeitar a
+// retenção. Os nomes datados (DatedFilename) são lexicograficamente ordenáveis por data, então
+// basta ordenar desc e podar além dos `retention` mais novos. retention <= 0 → poda todos.
+// Função pura (testável sem I/O); RNF-BKP2-02: nunca devolve o mais novo quando retention >= 1.
+func LocalSnapshotsToPrune(names []string, retention int) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	sorted := make([]string, len(names))
+	copy(sorted, names)
+	sort.Sort(sort.Reverse(sort.StringSlice(sorted))) // mais novos primeiro (nome datado ISO)
+	if retention < 0 {
+		retention = 0
+	}
+	if retention >= len(sorted) {
+		return nil
+	}
+	return sorted[retention:]
 }
