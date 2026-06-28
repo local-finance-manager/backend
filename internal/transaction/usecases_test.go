@@ -196,7 +196,7 @@ func TestListTransactions_RepoError(t *testing.T) {
 func TestCreateTransaction_Success(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewCreateTransaction(repo, facade, okChecker())
+	uc := NewCreateTransaction(repo, facade, okChecker(), nil)
 
 	got, err := uc.Execute(context.Background(), CreateTransactionInput{
 		Title:          "Aluguel",
@@ -220,7 +220,7 @@ func TestCreateTransaction_Success(t *testing.T) {
 func TestCreateTransaction_ValidationError(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewCreateTransaction(repo, facade, okChecker())
+	uc := NewCreateTransaction(repo, facade, okChecker(), nil)
 
 	_, err := uc.Execute(context.Background(), CreateTransactionInput{
 		Title: "", Amount: 0, SubcategoryID: "sub-1",
@@ -234,7 +234,7 @@ func TestCreateTransaction_ValidationError(t *testing.T) {
 func TestCreateTransaction_SubcategoryNotFound(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{notFound: true}
-	uc := NewCreateTransaction(repo, facade, okChecker())
+	uc := NewCreateTransaction(repo, facade, okChecker(), nil)
 
 	_, err := uc.Execute(context.Background(), CreateTransactionInput{
 		Title:          "Aluguel",
@@ -253,7 +253,7 @@ func TestCreateTransaction_CardCheckerError(t *testing.T) {
 	repo := newFakeRepo()
 	facade := &fakeSubFacade{typ: "despesa"}
 	checker := &fakeCardChecker{err: errors.New("cartão arquivado")}
-	uc := NewCreateTransaction(repo, facade, checker)
+	uc := NewCreateTransaction(repo, facade, checker, nil)
 
 	cardID := "card-1"
 	_, err := uc.Execute(context.Background(), CreateTransactionInput{
@@ -276,7 +276,7 @@ func TestUpdateTransaction_Success(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-upd", StatusPendente)
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewUpdateTransaction(repo, facade, okChecker())
+	uc := NewUpdateTransaction(repo, facade, okChecker(), nil)
 
 	got, err := uc.Execute(context.Background(), UpdateTransactionInput{
 		ID:             "txn-upd",
@@ -303,7 +303,7 @@ func TestUpdateTransaction_InvalidTransition(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-can", StatusCancelado)
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewUpdateTransaction(repo, facade, okChecker())
+	uc := NewUpdateTransaction(repo, facade, okChecker(), nil)
 
 	// cancelado → realizado is prohibited
 	pd := "2026-01-10"
@@ -324,7 +324,7 @@ func TestUpdateTransaction_InvalidTransition(t *testing.T) {
 
 func TestUpdateTransaction_NotFound(t *testing.T) {
 	facade := &fakeSubFacade{typ: "despesa"}
-	uc := NewUpdateTransaction(newFakeRepo(), facade, okChecker())
+	uc := NewUpdateTransaction(newFakeRepo(), facade, okChecker(), nil)
 
 	_, err := uc.Execute(context.Background(), UpdateTransactionInput{
 		ID:             "missing",
@@ -345,7 +345,7 @@ func TestUpdateTransaction_NotFound(t *testing.T) {
 func TestConfirmTransaction_Success(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-conf", StatusPendente)
-	uc := NewConfirmTransaction(repo)
+	uc := NewConfirmTransaction(repo, nil)
 
 	got, err := uc.Execute(context.Background(), ConfirmTransactionInput{
 		ID:          "txn-conf",
@@ -362,7 +362,7 @@ func TestConfirmTransaction_Success(t *testing.T) {
 func TestConfirmTransaction_InvalidTransition(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-can", StatusCancelado)
-	uc := NewConfirmTransaction(repo)
+	uc := NewConfirmTransaction(repo, nil)
 
 	_, err := uc.Execute(context.Background(), ConfirmTransactionInput{
 		ID:          "txn-can",
@@ -376,7 +376,7 @@ func TestConfirmTransaction_InvalidTransition(t *testing.T) {
 func TestConfirmTransaction_ValidationError(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-1", StatusPendente)
-	uc := NewConfirmTransaction(repo)
+	uc := NewConfirmTransaction(repo, nil)
 
 	_, err := uc.Execute(context.Background(), ConfirmTransactionInput{
 		ID:          "txn-1",
@@ -392,7 +392,7 @@ func TestConfirmTransaction_ValidationError(t *testing.T) {
 func TestDeleteTransaction_Success(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "txn-del", StatusPendente)
-	uc := NewDeleteTransaction(repo)
+	uc := NewDeleteTransaction(repo, nil)
 
 	if err := uc.Execute(context.Background(), "txn-del"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -403,7 +403,7 @@ func TestDeleteTransaction_Success(t *testing.T) {
 }
 
 func TestDeleteTransaction_NotFound(t *testing.T) {
-	uc := NewDeleteTransaction(newFakeRepo())
+	uc := NewDeleteTransaction(newFakeRepo(), nil)
 	err := uc.Execute(context.Background(), "missing")
 	if err == nil {
 		t.Error("expected not-found error")
@@ -415,7 +415,7 @@ func TestDeleteTransaction_NotFound(t *testing.T) {
 func TestCancelTransaction_FromPendente(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "t1", StatusPendente)
-	d, err := NewCancelTransaction(repo).Execute(context.Background(), "t1")
+	d, err := NewCancelTransaction(repo, nil).Execute(context.Background(), "t1")
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestCancelTransaction_FromRealizadoClearsPaymentDate(t *testing.T) {
 	repo.data["t1"] = cur
 	repo.details["t1"] = TransactionDetail{Transaction: cur}
 
-	d, err := NewCancelTransaction(repo).Execute(context.Background(), "t1")
+	d, err := NewCancelTransaction(repo, nil).Execute(context.Background(), "t1")
 	if err != nil {
 		t.Fatalf("cancel realizado: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestCancelTransaction_FromRealizadoClearsPaymentDate(t *testing.T) {
 func TestCancelTransaction_Idempotent(t *testing.T) {
 	repo := newFakeRepo()
 	seedDetail(repo, "t1", StatusCancelado)
-	d, err := NewCancelTransaction(repo).Execute(context.Background(), "t1")
+	d, err := NewCancelTransaction(repo, nil).Execute(context.Background(), "t1")
 	if err != nil {
 		t.Fatalf("cancelar já-cancelado deveria ser no-op: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestCancelTransaction_Idempotent(t *testing.T) {
 }
 
 func TestCancelTransaction_NotFound(t *testing.T) {
-	if _, err := NewCancelTransaction(newFakeRepo()).Execute(context.Background(), "missing"); err == nil {
+	if _, err := NewCancelTransaction(newFakeRepo(), nil).Execute(context.Background(), "missing"); err == nil {
 		t.Error("esperava erro para id inexistente")
 	}
 }

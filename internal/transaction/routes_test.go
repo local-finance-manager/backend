@@ -30,10 +30,10 @@ func newTransactionRouterWith(db *sql.DB, facade transaction.SubcategoryFacade, 
 	h := transaction.NewHandler(transaction.HandlerDeps{
 		GetTransaction:     transaction.NewGetTransaction(repo),
 		ListTransactions:   transaction.NewListTransactions(repo),
-		CreateTransaction:  transaction.NewCreateTransaction(repo, facade, checker),
-		UpdateTransaction:  transaction.NewUpdateTransaction(repo, facade, checker),
-		ConfirmTransaction: transaction.NewConfirmTransaction(repo),
-		DeleteTransaction:  transaction.NewDeleteTransaction(repo),
+		CreateTransaction:  transaction.NewCreateTransaction(repo, facade, checker, nil),
+		UpdateTransaction:  transaction.NewUpdateTransaction(repo, facade, checker, nil),
+		ConfirmTransaction: transaction.NewConfirmTransaction(repo, nil),
+		DeleteTransaction:  transaction.NewDeleteTransaction(repo, nil),
 	})
 	r := chi.NewRouter()
 	r.Route("/api/transactions", transaction.Routes(h))
@@ -60,10 +60,10 @@ func newTransactionRouter(db *sql.DB) http.Handler {
 	h := transaction.NewHandler(transaction.HandlerDeps{
 		GetTransaction:     transaction.NewGetTransaction(repo),
 		ListTransactions:   transaction.NewListTransactions(repo),
-		CreateTransaction:  transaction.NewCreateTransaction(repo, facade, checker),
-		UpdateTransaction:  transaction.NewUpdateTransaction(repo, facade, checker),
-		ConfirmTransaction: transaction.NewConfirmTransaction(repo),
-		DeleteTransaction:  transaction.NewDeleteTransaction(repo),
+		CreateTransaction:  transaction.NewCreateTransaction(repo, facade, checker, nil),
+		UpdateTransaction:  transaction.NewUpdateTransaction(repo, facade, checker, nil),
+		ConfirmTransaction: transaction.NewConfirmTransaction(repo, nil),
+		DeleteTransaction:  transaction.NewDeleteTransaction(repo, nil),
 	})
 	r := chi.NewRouter()
 	r.Route("/api/transactions", transaction.Routes(h))
