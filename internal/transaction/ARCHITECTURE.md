@@ -236,9 +236,26 @@ cancelado  → pendente            (cancelado → realizado é PROIBIDO; passe p
 | PUT    | /api/transactions/{id}               | UpdateTransaction   |
 | DELETE | /api/transactions/{id}               | DeleteTransaction   |
 | PATCH  | /api/transactions/{id}/confirm       | ConfirmTransaction  |
+| PATCH  | /api/transactions/{id}/cancel        | CancelTransaction   |
 
 > `PUT` tem semântica de full-replace dos campos mutáveis.
-> `PATCH .../confirm` é a transição dedicada para `realizado`.
+> `PATCH .../confirm` é a transição dedicada para `realizado`; `PATCH .../cancel` para `cancelado`.
+
+---
+
+## Integração com `report` (relatórios/fechamento)
+
+- **Produz** `ReportAggregator` (`report_aggregator.go`): agrega a tabela `transactions`
+  por mês (realizado/pendente) + saldo acumulado (E6) e a distribuição de despesa por
+  forma de pagamento. Satisfaz `report.RealizedAggregator`/`PendingAggregator`/
+  `PaymentBreakdownReader` por structural typing (retorna `shared.*`). Base **acrual,
+  incluindo cartão** (≠ do regime de caixa D14 do resumo) — ver `report/ARCHITECTURE.md`.
+- **Consome** `MonthGuard` (port, definido em `repository.go`; implementado por
+  `report.Service`, injetado no `main.go`, **nil-safe**): os use cases de mutação
+  (create/update/confirm/cancel/delete) chamam `EnsureEditable` (bloqueia mês fechado-
+  bloqueado, RF-REL-10) antes da escrita e `AfterChange` (recalcula o snapshot de mês
+  fechado-ajustável, RF-REL-09) depois. Update/edição que cruza meses valida e recalcula
+  **ambos** os meses (origem e destino).
 
 ---
 

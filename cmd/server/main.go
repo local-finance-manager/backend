@@ -24,6 +24,7 @@ import (
 	"github.com/local-finance-manager/backend/internal/database"
 	"github.com/local-finance-manager/backend/internal/installment"
 	"github.com/local-finance-manager/backend/internal/middleware"
+	"github.com/local-finance-manager/backend/internal/report"
 	"github.com/local-finance-manager/backend/internal/transaction"
 )
 
@@ -187,15 +188,31 @@ func run(log *slog.Logger) error {
 	cardChecker := creditcard.NewCreditCardChecker(ccRepo) // transaction valida vínculo via este facade
 	cardReader := transaction.NewCardReader(db)            // creditcard lê lançamentos via este facade
 
+	// Relatórios (report): owner do fechamento/snapshot. Consome aggregators do
+	// transaction (realizado/pendente/forma de pagamento) e a árvore do category —
+	// todos via ports neutros (shared.*), sem o report importar esses módulos.
+	reportAggregator := transaction.NewReportAggregator(db)
+	categoryTree := category.NewCategoryTreeFacade(db)
+	reportService := report.NewService(report.Deps{
+		Repo:     report.NewSQLiteRepository(db),
+		Realized: reportAggregator,
+		Pending:  reportAggregator,
+		Tree:     categoryTree,
+		Payments: reportAggregator,
+	})
+	reportHandler := report.NewHandler(reportService)
+
 	transactionRepo := transaction.NewSQLiteRepository(db)
+	// reportService é o MonthGuard injetado: bloqueia mês fechado-bloqueado e
+	// recalcula o snapshot de mês fechado-ajustável após alterações (RF-REL-07..10).
 	transactionHandler := transaction.NewHandler(transaction.HandlerDeps{
 		GetTransaction:     transaction.NewGetTransaction(transactionRepo),
 		ListTransactions:   transaction.NewListTransactions(transactionRepo),
-		CreateTransaction:  transaction.NewCreateTransaction(transactionRepo, catFacade, cardChecker),
-		UpdateTransaction:  transaction.NewUpdateTransaction(transactionRepo, catFacade, cardChecker),
-		ConfirmTransaction: transaction.NewConfirmTransaction(transactionRepo),
-		CancelTransaction:  transaction.NewCancelTransaction(transactionRepo),
-		DeleteTransaction:  transaction.NewDeleteTransaction(transactionRepo),
+		CreateTransaction:  transaction.NewCreateTransaction(transactionRepo, catFacade, cardChecker, reportService),
+		UpdateTransaction:  transaction.NewUpdateTransaction(transactionRepo, catFacade, cardChecker, reportService),
+		ConfirmTransaction: transaction.NewConfirmTransaction(transactionRepo, reportService),
+		CancelTransaction:  transaction.NewCancelTransaction(transactionRepo, reportService),
+		DeleteTransaction:  transaction.NewDeleteTransaction(transactionRepo, reportService),
 	})
 
 	creditCardHandler := creditcard.NewHandler(creditcard.HandlerDeps{
@@ -255,6 +272,7 @@ func run(log *slog.Logger) error {
 	r.Route("/api/transactions", transaction.Routes(transactionHandler))
 	r.Route("/api/credit-cards", creditcard.Routes(creditCardHandler))
 	r.Route("/api/installments", installment.Routes(installmentHandler))
+	r.Route("/api/reports", report.Routes(reportHandler))
 	r.Route("/api/backup", backup.Routes(backup.NewHandler(backupSvc)))
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {

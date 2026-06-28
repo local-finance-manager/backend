@@ -25,6 +25,15 @@ type SubcategoryFacade interface {
 	GetSubcategoryType(ctx context.Context, subcategoryID string) (string, error)
 }
 
+// MonthGuard protege meses fechados (módulo report): bloqueia alterações em mês
+// fechado-bloqueado (≥90 dias) e recalcula o snapshot de meses fechados-ajustáveis
+// após uma alteração. Interface definida aqui (consumidor); implementada por
+// report.Service e injetada no main.go. Pode ser nil (sem report → sem guarda).
+type MonthGuard interface {
+	EnsureEditable(ctx context.Context, competenceDate string) error
+	AfterChange(ctx context.Context, competenceDates ...string) error
+}
+
 // CreditCardChecker valida que um cartão pode receber vínculo de lançamento.
 // Interface definida no consumidor (transaction); implementada por um facade do
 // módulo creditcard e injetada no main.go. Retorna apenas error (domainerr),

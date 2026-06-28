@@ -66,15 +66,22 @@ type createTransactionImpl struct {
 	repo        TransactionRepository
 	facade      SubcategoryFacade
 	cardChecker CreditCardChecker
+	guard       MonthGuard
 }
 
-func NewCreateTransaction(repo TransactionRepository, facade SubcategoryFacade, cardChecker CreditCardChecker) CreateTransactionUseCase {
-	return &createTransactionImpl{repo: repo, facade: facade, cardChecker: cardChecker}
+func NewCreateTransaction(repo TransactionRepository, facade SubcategoryFacade, cardChecker CreditCardChecker, guard MonthGuard) CreateTransactionUseCase {
+	return &createTransactionImpl{repo: repo, facade: facade, cardChecker: cardChecker, guard: guard}
 }
 
 func (uc *createTransactionImpl) Execute(ctx context.Context, in CreateTransactionInput) (TransactionDetail, error) {
 	if err := ValidateCreate(in); err != nil {
 		return TransactionDetail{}, err
+	}
+
+	if uc.guard != nil {
+		if err := uc.guard.EnsureEditable(ctx, in.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
 	}
 
 	if in.CreditCardID != nil {
@@ -110,6 +117,11 @@ func (uc *createTransactionImpl) Execute(ctx context.Context, in CreateTransacti
 	if err := uc.repo.Create(ctx, t); err != nil {
 		return TransactionDetail{}, domainerr.NewInternal("erro ao criar lançamento")
 	}
+	if uc.guard != nil {
+		if err := uc.guard.AfterChange(ctx, in.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
+	}
 	return uc.repo.Get(ctx, t.ID)
 }
 
@@ -119,10 +131,11 @@ type updateTransactionImpl struct {
 	repo        TransactionRepository
 	facade      SubcategoryFacade
 	cardChecker CreditCardChecker
+	guard       MonthGuard
 }
 
-func NewUpdateTransaction(repo TransactionRepository, facade SubcategoryFacade, cardChecker CreditCardChecker) UpdateTransactionUseCase {
-	return &updateTransactionImpl{repo: repo, facade: facade, cardChecker: cardChecker}
+func NewUpdateTransaction(repo TransactionRepository, facade SubcategoryFacade, cardChecker CreditCardChecker, guard MonthGuard) UpdateTransactionUseCase {
+	return &updateTransactionImpl{repo: repo, facade: facade, cardChecker: cardChecker, guard: guard}
 }
 
 func (uc *updateTransactionImpl) Execute(ctx context.Context, in UpdateTransactionInput) (TransactionDetail, error) {
@@ -133,6 +146,16 @@ func (uc *updateTransactionImpl) Execute(ctx context.Context, in UpdateTransacti
 	current, err := uc.repo.Get(ctx, in.ID)
 	if err != nil {
 		return TransactionDetail{}, err
+	}
+
+	// Mês fechado-bloqueado: ambos os lados (origem e destino, se a competência mudou).
+	if uc.guard != nil {
+		if err := uc.guard.EnsureEditable(ctx, current.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
+		if err := uc.guard.EnsureEditable(ctx, in.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
 	}
 
 	// Status transitions are enforced unless the incoming status equals current.
@@ -177,15 +200,23 @@ func (uc *updateTransactionImpl) Execute(ctx context.Context, in UpdateTransacti
 	if err := uc.repo.Update(ctx, t); err != nil {
 		return TransactionDetail{}, domainerr.NewInternal("erro ao atualizar lançamento")
 	}
+	if uc.guard != nil {
+		if err := uc.guard.AfterChange(ctx, current.CompetenceDate, in.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
+	}
 	return uc.repo.Get(ctx, in.ID)
 }
 
 // ─── confirmTransactionImpl ───────────────────────────────────────────────────
 
-type confirmTransactionImpl struct{ repo TransactionRepository }
+type confirmTransactionImpl struct {
+	repo  TransactionRepository
+	guard MonthGuard
+}
 
-func NewConfirmTransaction(repo TransactionRepository) ConfirmTransactionUseCase {
-	return &confirmTransactionImpl{repo: repo}
+func NewConfirmTransaction(repo TransactionRepository, guard MonthGuard) ConfirmTransactionUseCase {
+	return &confirmTransactionImpl{repo: repo, guard: guard}
 }
 
 func (uc *confirmTransactionImpl) Execute(ctx context.Context, in ConfirmTransactionInput) (TransactionDetail, error) {
@@ -196,6 +227,12 @@ func (uc *confirmTransactionImpl) Execute(ctx context.Context, in ConfirmTransac
 	current, err := uc.repo.Get(ctx, in.ID)
 	if err != nil {
 		return TransactionDetail{}, err
+	}
+
+	if uc.guard != nil {
+		if err := uc.guard.EnsureEditable(ctx, current.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
 	}
 
 	if !CanTransitionTo(current.Status, StatusRealizado) {
@@ -210,15 +247,23 @@ func (uc *confirmTransactionImpl) Execute(ctx context.Context, in ConfirmTransac
 	if err := uc.repo.Update(ctx, t); err != nil {
 		return TransactionDetail{}, domainerr.NewInternal("erro ao confirmar lançamento")
 	}
+	if uc.guard != nil {
+		if err := uc.guard.AfterChange(ctx, current.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
+	}
 	return uc.repo.Get(ctx, in.ID)
 }
 
 // ─── cancelTransactionImpl ────────────────────────────────────────────────────
 
-type cancelTransactionImpl struct{ repo TransactionRepository }
+type cancelTransactionImpl struct {
+	repo  TransactionRepository
+	guard MonthGuard
+}
 
-func NewCancelTransaction(repo TransactionRepository) CancelTransactionUseCase {
-	return &cancelTransactionImpl{repo: repo}
+func NewCancelTransaction(repo TransactionRepository, guard MonthGuard) CancelTransactionUseCase {
+	return &cancelTransactionImpl{repo: repo, guard: guard}
 }
 
 func (uc *cancelTransactionImpl) Execute(ctx context.Context, id string) (TransactionDetail, error) {
@@ -228,6 +273,11 @@ func (uc *cancelTransactionImpl) Execute(ctx context.Context, id string) (Transa
 	}
 	if current.Status == StatusCancelado {
 		return current, nil // já cancelado: idempotente
+	}
+	if uc.guard != nil {
+		if err := uc.guard.EnsureEditable(ctx, current.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
 	}
 	if !CanTransitionTo(current.Status, StatusCancelado) {
 		return TransactionDetail{}, ErrInvalidTransition(current.Status, StatusCancelado)
@@ -241,23 +291,42 @@ func (uc *cancelTransactionImpl) Execute(ctx context.Context, id string) (Transa
 	if err := uc.repo.Update(ctx, t); err != nil {
 		return TransactionDetail{}, domainerr.NewInternal("erro ao cancelar lançamento")
 	}
+	if uc.guard != nil {
+		if err := uc.guard.AfterChange(ctx, current.CompetenceDate); err != nil {
+			return TransactionDetail{}, err
+		}
+	}
 	return uc.repo.Get(ctx, id)
 }
 
 // ─── deleteTransactionImpl ────────────────────────────────────────────────────
 
-type deleteTransactionImpl struct{ repo TransactionRepository }
+type deleteTransactionImpl struct {
+	repo  TransactionRepository
+	guard MonthGuard
+}
 
-func NewDeleteTransaction(repo TransactionRepository) DeleteTransactionUseCase {
-	return &deleteTransactionImpl{repo: repo}
+func NewDeleteTransaction(repo TransactionRepository, guard MonthGuard) DeleteTransactionUseCase {
+	return &deleteTransactionImpl{repo: repo, guard: guard}
 }
 
 func (uc *deleteTransactionImpl) Execute(ctx context.Context, id string) error {
-	if _, err := uc.repo.Get(ctx, id); err != nil {
+	current, err := uc.repo.Get(ctx, id)
+	if err != nil {
 		return err
+	}
+	if uc.guard != nil {
+		if err := uc.guard.EnsureEditable(ctx, current.CompetenceDate); err != nil {
+			return err
+		}
 	}
 	if err := uc.repo.Delete(ctx, id); err != nil {
 		return domainerr.NewInternal("erro ao excluir lançamento")
+	}
+	if uc.guard != nil {
+		if err := uc.guard.AfterChange(ctx, current.CompetenceDate); err != nil {
+			return err
+		}
 	}
 	return nil
 }
