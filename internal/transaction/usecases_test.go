@@ -409,3 +409,56 @@ func TestDeleteTransaction_NotFound(t *testing.T) {
 		t.Error("expected not-found error")
 	}
 }
+
+// ─── CancelTransaction ──────────────────────────────────────────────────────────
+
+func TestCancelTransaction_FromPendente(t *testing.T) {
+	repo := newFakeRepo()
+	seedDetail(repo, "t1", StatusPendente)
+	d, err := NewCancelTransaction(repo).Execute(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if d.Status != StatusCancelado {
+		t.Errorf("status: got %s, want cancelado", d.Status)
+	}
+	if d.PaymentDate != nil {
+		t.Error("paymentDate deveria ser nil após cancelar")
+	}
+}
+
+func TestCancelTransaction_FromRealizadoClearsPaymentDate(t *testing.T) {
+	repo := newFakeRepo()
+	seedDetail(repo, "t1", StatusRealizado)
+	pd := "2026-01-01"
+	cur := repo.data["t1"]
+	cur.PaymentDate = &pd
+	repo.data["t1"] = cur
+	repo.details["t1"] = TransactionDetail{Transaction: cur}
+
+	d, err := NewCancelTransaction(repo).Execute(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("cancel realizado: %v", err)
+	}
+	if d.Status != StatusCancelado || d.PaymentDate != nil {
+		t.Errorf("realizado→cancelado deveria zerar paymentDate; got status=%s pd=%v", d.Status, d.PaymentDate)
+	}
+}
+
+func TestCancelTransaction_Idempotent(t *testing.T) {
+	repo := newFakeRepo()
+	seedDetail(repo, "t1", StatusCancelado)
+	d, err := NewCancelTransaction(repo).Execute(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("cancelar já-cancelado deveria ser no-op: %v", err)
+	}
+	if d.Status != StatusCancelado {
+		t.Errorf("status deveria continuar cancelado")
+	}
+}
+
+func TestCancelTransaction_NotFound(t *testing.T) {
+	if _, err := NewCancelTransaction(newFakeRepo()).Execute(context.Background(), "missing"); err == nil {
+		t.Error("esperava erro para id inexistente")
+	}
+}

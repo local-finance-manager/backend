@@ -142,8 +142,20 @@ func (s *Service) CancelRemaining(ctx context.Context, id string) (GroupDetail, 
 	return s.Get(ctx, id)
 }
 
-// Delete remove a compra inteira (cascade nas parcelas — RF-PARC-09).
+// Delete remove a compra inteira e suas parcelas (cascade — RF-PARC-09), MAS só quando
+// nenhuma parcela já foi paga (realizado). Se houver parcela paga, excluir apagaria
+// histórico financeiro real → bloqueia e orienta a cancelar as restantes (as pagas
+// são preservadas). "Cancelar restantes" só mexe nas pendentes (abertas).
 func (s *Service) Delete(ctx context.Context, id string) error {
+	_, parcelas, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	for _, p := range parcelas {
+		if p.Status == parcelaRealized {
+			return ErrInstallmentHasPaidParcelas
+		}
+	}
 	return s.repo.Delete(ctx, id)
 }
 

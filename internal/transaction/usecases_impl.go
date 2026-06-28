@@ -213,6 +213,37 @@ func (uc *confirmTransactionImpl) Execute(ctx context.Context, in ConfirmTransac
 	return uc.repo.Get(ctx, in.ID)
 }
 
+// ─── cancelTransactionImpl ────────────────────────────────────────────────────
+
+type cancelTransactionImpl struct{ repo TransactionRepository }
+
+func NewCancelTransaction(repo TransactionRepository) CancelTransactionUseCase {
+	return &cancelTransactionImpl{repo: repo}
+}
+
+func (uc *cancelTransactionImpl) Execute(ctx context.Context, id string) (TransactionDetail, error) {
+	current, err := uc.repo.Get(ctx, id)
+	if err != nil {
+		return TransactionDetail{}, err
+	}
+	if current.Status == StatusCancelado {
+		return current, nil // já cancelado: idempotente
+	}
+	if !CanTransitionTo(current.Status, StatusCancelado) {
+		return TransactionDetail{}, ErrInvalidTransition(current.Status, StatusCancelado)
+	}
+
+	t := current.Transaction
+	t.Status = StatusCancelado
+	t.PaymentDate = nil // cancelado nunca tem data de pagamento
+	t.UpdatedAt = time.Now().UTC()
+
+	if err := uc.repo.Update(ctx, t); err != nil {
+		return TransactionDetail{}, domainerr.NewInternal("erro ao cancelar lançamento")
+	}
+	return uc.repo.Get(ctx, id)
+}
+
 // ─── deleteTransactionImpl ────────────────────────────────────────────────────
 
 type deleteTransactionImpl struct{ repo TransactionRepository }

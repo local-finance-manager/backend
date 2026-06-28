@@ -160,6 +160,9 @@ var (
 		"só é possível parcelar despesas", domainerr.WithDisplayable())
 	ErrImmutableSeriesField = domainerr.NewBadRequest(
 		"para alterar valor, parcelas ou data, recrie a compra parcelada", domainerr.WithDisplayable())
+	ErrInstallmentHasPaidParcelas = domainerr.NewConflict(
+		"não é possível excluir: há parcelas pagas. Cancele as parcelas restantes (as pagas são preservadas).",
+		domainerr.WithDisplayable())
 )
 
 // ─── Rateio exato de centavos (RNF-PARC-02) ─────────────────────────────────

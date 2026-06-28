@@ -27,6 +27,11 @@ type ConfirmTransactionUseCase interface {
 	Execute(ctx context.Context, in ConfirmTransactionInput) (TransactionDetail, error)
 }
 
+// CancelTransactionUseCase transitions a transaction to cancelado (no body needed).
+type CancelTransactionUseCase interface {
+	Execute(ctx context.Context, id string) (TransactionDetail, error)
+}
+
 // DeleteTransactionUseCase removes a transaction permanently.
 type DeleteTransactionUseCase interface {
 	Execute(ctx context.Context, id string) error

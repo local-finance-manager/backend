@@ -318,3 +318,44 @@ func TestService_List(t *testing.T) {
 		t.Errorf("got total=%d len=%d, want 2/2", res.Pagination.Total, len(res.Data))
 	}
 }
+
+// ─── Delete: proteção contra parcelas pagas ──────────────────────────────────
+
+func createGroupID(t *testing.T, repo *fakeRepo) string {
+	t.Helper()
+	if _, err := despesaSvc(repo).Create(context.Background(), validInput()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for id := range repo.groups {
+		return id
+	}
+	t.Fatal("nenhum grupo criado")
+	return ""
+}
+
+func TestService_Delete_BlocksWhenPaidParcela(t *testing.T) {
+	repo := newFakeRepo()
+	id := createGroupID(t, repo)
+	repo.parcelas[id][0].Status = "realizado" // uma parcela paga
+
+	err := despesaSvc(repo).Delete(context.Background(), id)
+	if err != installment.ErrInstallmentHasPaidParcelas {
+		t.Fatalf("esperava ErrInstallmentHasPaidParcelas, got %v", err)
+	}
+	if _, ok := repo.groups[id]; !ok {
+		t.Error("grupo NÃO deveria ser excluído quando há parcela paga")
+	}
+}
+
+func TestService_Delete_OkWhenNoPaid(t *testing.T) {
+	repo := newFakeRepo()
+	id := createGroupID(t, repo)
+	repo.parcelas[id][0].Status = "cancelado" // nenhuma paga (pendente/cancelado)
+
+	if err := despesaSvc(repo).Delete(context.Background(), id); err != nil {
+		t.Fatalf("delete sem parcelas pagas deveria funcionar: %v", err)
+	}
+	if _, ok := repo.groups[id]; ok {
+		t.Error("grupo deveria ter sido excluído")
+	}
+}

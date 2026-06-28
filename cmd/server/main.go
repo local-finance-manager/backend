@@ -194,6 +194,7 @@ func run(log *slog.Logger) error {
 		CreateTransaction:  transaction.NewCreateTransaction(transactionRepo, catFacade, cardChecker),
 		UpdateTransaction:  transaction.NewUpdateTransaction(transactionRepo, catFacade, cardChecker),
 		ConfirmTransaction: transaction.NewConfirmTransaction(transactionRepo),
+		CancelTransaction:  transaction.NewCancelTransaction(transactionRepo),
 		DeleteTransaction:  transaction.NewDeleteTransaction(transactionRepo),
 	})
 

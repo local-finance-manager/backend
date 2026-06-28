@@ -34,6 +34,7 @@ type HandlerDeps struct {
 	CreateTransaction  CreateTransactionUseCase
 	UpdateTransaction  UpdateTransactionUseCase
 	ConfirmTransaction ConfirmTransactionUseCase
+	CancelTransaction  CancelTransactionUseCase
 	DeleteTransaction  DeleteTransactionUseCase
 }
 
@@ -332,6 +333,17 @@ func (h *Handler) ConfirmTransaction(w http.ResponseWriter, r *http.Request) {
 		ID:          id,
 		PaymentDate: req.PaymentDate,
 	})
+	if err != nil {
+		domainerr.WriteError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toDetailResp(d))
+}
+
+// CancelTransaction handles PATCH /api/transactions/{id}/cancel
+func (h *Handler) CancelTransaction(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, err := h.deps.CancelTransaction.Execute(r.Context(), id)
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return

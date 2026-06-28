@@ -14,6 +14,7 @@ func Routes(h *Handler) func(chi.Router) {
 			r.Delete("/", h.DeleteTransaction)
 
 			r.Patch("/confirm", h.ConfirmTransaction)
+			r.Patch("/cancel", h.CancelTransaction)
 		})
 	}
 }
