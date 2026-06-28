@@ -549,17 +549,14 @@ func SyncOnBoot(ctx context.Context, drive DriveClient, store StateStore, cfg co
 		return // nada remoto ainda
 	}
 
-	localExists := fileExists(dbPath)
-	if localExists && !IsRemoteNewer(remote.ModifiedTime, state.LastBackupAt, bootSyncSkew) {
-		return // local é igual/mais novo → nada a fazer
-	}
-
-	if localExists {
-		safety := filepath.Join(cfg.DataDir, DatedFilename("financas-pre-bootsync", time.Now().UTC()))
-		if err := copyFile(dbPath, safety); err != nil {
-			log.Warn("backup boot-sync: safety copy falhou; abortando p/ não perder local", "error", err)
-			return
-		}
+	// Local-first: o banco LOCAL é a fonte da verdade. Só restauramos do Drive
+	// quando NÃO existe banco local (máquina nova / recuperação de desastre).
+	// NUNCA sobrescrevemos automaticamente um banco existente no boot — isso já
+	// causou perda de dados (o "mais recente vence" baixava versão velha por cima
+	// quando o sidecar de estado se perdia). Restaurar sobre um banco existente é
+	// ação EXPLÍCITA do usuário, com confirmação (RF-BKP-08), não comportamento de boot.
+	if fileExists(dbPath) {
+		return
 	}
 
 	tmp := dbPath + ".bootsync.tmp"

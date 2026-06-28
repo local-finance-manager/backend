@@ -485,20 +485,39 @@ func bootCfg(dir string) config.BackupConfig {
 	return config.BackupConfig{FolderName: "Financas", LatestFilename: "financas-latest.sqlite", DataDir: dir}
 }
 
-func TestSyncOnBoot_RestoresWhenRemoteNewer(t *testing.T) {
+// Local-first: com banco local existente, o boot NUNCA sobrescreve (mesmo que o
+// remoto pareça mais novo / sidecar zerado). Restaurar sobre um banco existente é
+// ação EXPLÍCITA do usuário — sobrescrever no boot já causou perda de dados.
+func TestSyncOnBoot_DoesNotOverwriteExistingLocal(t *testing.T) {
 	drive := newFakeDrive()
-	valid := validSQLiteBytes(t)
-	drive.put("financas-latest.sqlite", bytes.NewReader(valid)) // modifiedTime ~agora
-	store := &fakeStore{}                                       // sidecar zero → remoto mais novo
+	drive.put("financas-latest.sqlite", bytes.NewReader(validSQLiteBytes(t)))
+	store := &fakeStore{} // sidecar zero → no comportamento ANTIGO, restauraria por cima
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "financas.sqlite")
-	os.WriteFile(dbPath, []byte("old-local"), 0o600)
+	os.WriteFile(dbPath, []byte("local-keep"), 0o600)
+
+	backup.SyncOnBoot(context.Background(), drive, store, bootCfg(dir), dbPath, discardLog())
+
+	got, _ := os.ReadFile(dbPath)
+	if string(got) != "local-keep" {
+		t.Error("banco local existente NUNCA pode ser sobrescrito no boot")
+	}
+}
+
+// Sem banco local (máquina nova / recuperação de desastre), o boot restaura do remoto.
+func TestSyncOnBoot_RestoresWhenNoLocal(t *testing.T) {
+	drive := newFakeDrive()
+	valid := validSQLiteBytes(t)
+	drive.put("financas-latest.sqlite", bytes.NewReader(valid))
+	store := &fakeStore{}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "financas.sqlite") // não existe ainda
 
 	backup.SyncOnBoot(context.Background(), drive, store, bootCfg(dir), dbPath, discardLog())
 
 	got, _ := os.ReadFile(dbPath)
 	if !bytes.Equal(got, valid) {
-		t.Error("dbPath deveria ter sido substituído pelo backup remoto (mais recente)")
+		t.Error("sem banco local, o boot deveria restaurar a versão remota")
 	}
 	if store.st.LatestFileID == "" || store.st.LastChecksumSHA256 == "" {
 		t.Errorf("sidecar deveria ter sido atualizado: %+v", store.st)

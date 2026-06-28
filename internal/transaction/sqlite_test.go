@@ -608,8 +608,8 @@ func TestTransactionRepo_GetSummary_ExcludesCardPurchases(t *testing.T) {
 	if s.TotalDespesas != 100000 {
 		t.Errorf("TotalDespesas: got %d, want 100000 (compra de cartão deve ser excluída)", s.TotalDespesas)
 	}
-	if s.CountTotal != 1 {
-		t.Errorf("CountTotal: got %d, want 1 (só a despesa normal conta)", s.CountTotal)
+	if s.CountTotal != 2 {
+		t.Errorf("CountTotal: got %d, want 2 (conta TODOS do filtro, incl. cartão — é o total da paginação)", s.CountTotal)
 	}
 
 	// mas a compra de cartão continua na listagem
@@ -629,5 +629,35 @@ func TestTransactionRepo_GetSummary_ExcludesCardPurchases(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "card" {
 		t.Errorf("filtro credit_card_id: esperado só 'card', got %v", got)
+	}
+}
+
+// O "Pendente" é prospectivo e DEVE incluir compras de cartão pendentes (RF: independente
+// de tipo). D14 exclui cartão só dos TOTAIS realizados em caixa, NUNCA do Pendente.
+func TestTransactionRepo_GetSummary_PendingIncludesCard(t *testing.T) {
+	db := newTestDB(t)
+	insertTestSub(t, db, "cat-exp", "Despesas", "despesa", "sub-exp", "Compras")
+	repo := transaction.NewSQLiteRepository(db)
+	ctx := context.Background()
+
+	// despesa pendente normal (sem cartão)
+	repo.Create(ctx, mkTransaction("p-normal", "Boleto", "sub-exp", 30000,
+		transaction.TypeDespesa, transaction.MethodBoleto, transaction.StatusPendente, "2026-01-05", nil))
+	// compra pendente NO CARTÃO
+	card := mkTransaction("p-card", "Notebook", "sub-exp", 500000,
+		transaction.TypeDespesa, transaction.MethodCartaoCredito, transaction.StatusPendente, "2026-01-06", nil)
+	cardID := "card-1"
+	card.CreditCardID = &cardID
+	repo.Create(ctx, card)
+
+	s, err := repo.GetSummary(ctx, transaction.TransactionFilter{})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if s.TotalPendente != 530000 {
+		t.Errorf("TotalPendente: got %d, want 530000 (deve incluir a compra de cartão pendente)", s.TotalPendente)
+	}
+	if s.TotalDespesas != 0 {
+		t.Errorf("TotalDespesas: got %d, want 0 (nada realizado)", s.TotalDespesas)
 	}
 }

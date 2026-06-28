@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -67,7 +68,7 @@ func Load() (*Config, error) {
 	}
 
 	if path := os.Getenv("DB_PATH"); path != "" {
-		cfg.Database.Path = path
+		cfg.Database.Path = expandHome(path)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o700); err != nil {
@@ -97,11 +98,31 @@ func loadBackup(b *BackupConfig, dbPath string) {
 	b.LocalSnapshotRetention = atoiDefault(os.Getenv("LOCAL_SNAPSHOT_RETENTION"), 5)
 
 	if path := os.Getenv("DRIVE_TOKEN_PATH"); path != "" {
-		b.TokenPath = path
+		b.TokenPath = expandHome(path)
 	} else {
 		home, _ := os.UserHomeDir()
 		b.TokenPath = filepath.Join(home, ".config", "financas", "token.json")
 	}
+}
+
+// expandHome expande um "~" inicial para o diretório home do usuário.
+// Go NÃO expande "~": um "~/..." não-expandido vira um caminho RELATIVO ao
+// working dir (ex.: /app/~/... dentro do container), gravando o banco numa
+// camada efêmera que é destruída a cada recreate do container — causa de perda
+// de dados silenciosa. Sempre passe caminhos de arquivo por aqui.
+func expandHome(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 func getenvDefault(key, def string) string {

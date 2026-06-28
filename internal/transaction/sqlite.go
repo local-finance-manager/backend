@@ -227,9 +227,23 @@ JOIN categories    c ON c.id = s.category_id`
 
 func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) (Summary, error) {
 	where, args := buildFilter(f)
-	// D14 (regime de caixa): compras no cartão NÃO entram no saldo financeiro — só o
+
+	var s Summary
+
+	// CountTotal = TOTAL de lançamentos que casam o filtro, INCLUINDO cartão. É o que
+	// alimenta a paginação (total/total_pages); excluir cartão aqui esconderia compras
+	// de cartão da 2ª página em diante (itens inacessíveis na tela).
+	countQuery := fmt.Sprintf(
+		"SELECT COUNT(*) FROM transactions t "+
+			"JOIN subcategories s ON s.id = t.subcategory_id "+
+			"JOIN categories c ON c.id = s.category_id WHERE %s", where)
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&s.CountTotal); err != nil {
+		return Summary{}, fmt.Errorf("transaction sqlite: summary count: %w", err)
+	}
+
+	// D14 (regime de caixa): compras no cartão NÃO entram nos TOTAIS de dinheiro — só o
 	// pagamento da fatura (lançamento normal, sem credit_card_id) conta. A cláusula vai
-	// só aqui, no summary; a List continua mostrando as compras de cartão normalmente.
+	// só aqui, nas somas; List e CountTotal continuam contando o cartão.
 	query := fmt.Sprintf("%s WHERE %s AND t.credit_card_id IS NULL GROUP BY t.type, t.status", summaryBaseSQL, where)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -238,7 +252,6 @@ func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) 
 	}
 	defer rows.Close()
 
-	var s Summary
 	for rows.Next() {
 		var typ, status string
 		var totalAmount int64
@@ -246,20 +259,31 @@ func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) 
 		if err := rows.Scan(&typ, &status, &totalAmount, &count); err != nil {
 			return Summary{}, fmt.Errorf("transaction sqlite: summary scan: %w", err)
 		}
-		s.CountTotal += count
+		_ = count // a contagem real vem de countQuery; aqui só as somas importam
 		switch {
 		case status == string(StatusRealizado) && typ == string(TypeDespesa):
 			s.TotalDespesas += totalAmount
 		case status == string(StatusRealizado) && typ == string(TypeReceita):
 			s.TotalReceitas += totalAmount
-		case status == string(StatusPendente):
-			s.TotalPendente += totalAmount
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return Summary{}, err
 	}
 	s.SaldoPeriodo = s.TotalReceitas - s.TotalDespesas
+
+	// TotalPendente = soma de TODOS os lançamentos pendentes do filtro, independente de
+	// tipo (RF lancamentos.md §sumário). NÃO aplica o filtro de cartão (D14): D14 vale
+	// para o saldo REALIZADO em caixa; "Pendente" é um indicador prospectivo e DEVE
+	// incluir compras de cartão pendentes — senão, com lançamentos só de cartão, o
+	// "Pendente" aparece zerado (enganoso). Query própria, sem `credit_card_id IS NULL`.
+	pendQuery := fmt.Sprintf(
+		"SELECT COALESCE(SUM(t.amount), 0) FROM transactions t "+
+			"JOIN subcategories s ON s.id = t.subcategory_id "+
+			"JOIN categories c ON c.id = s.category_id WHERE %s AND t.status = 'pendente'", where)
+	if err := r.db.QueryRowContext(ctx, pendQuery, args...).Scan(&s.TotalPendente); err != nil {
+		return Summary{}, fmt.Errorf("transaction sqlite: summary pendente: %w", err)
+	}
 
 	// E6 (saldo acumulado): SaldoInicial e SaldoFinal usam SÓ as datas do filtro (ignoram
 	// tipo/categoria/cartão/busca) — um "saldo" filtrado por categoria não faria sentido.

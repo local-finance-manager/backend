@@ -40,10 +40,35 @@ func main() {
 		return
 	}
 
+	// Healthcheck do container (docker-compose): faz um GET em /health no servidor
+	// já rodando e encerra com 0/1. NÃO sobe outro servidor (o comportamento antigo
+	// — cair no run() — subia uma instância inteira a cada 30s e brigava pela porta).
+	if len(os.Args) > 1 && os.Args[1] == "--health-check" {
+		os.Exit(healthCheck())
+	}
+
 	if err := run(log); err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// healthCheck retorna 0 se o servidor local responde 200 em /health, senão 1.
+func healthCheck() int {
+	port := os.Getenv("SERVER_PORT")
+	if port == "" {
+		port = "19742"
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/health")
+	if err != nil {
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }
 
 // stdoutPrinter satisfaz a interface esperada por backup.Authorize.

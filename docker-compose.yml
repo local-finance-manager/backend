@@ -11,6 +11,12 @@ services:
     # via env_file (RNF-BKP-09). O .env é criptografado com git-crypt no repo.
     env_file:
       - .env
+    # DB_PATH absoluto e explícito SOBREPÕE qualquer valor do .env (environment vence
+    # env_file). Blindagem contra o footgun do "~" não-expandido, que gravava o banco
+    # numa camada efêmera do container (/app/~/...) e perdia tudo a cada recreate.
+    # Este caminho é exatamente o volume montado abaixo → persistência garantida.
+    environment:
+      - DB_PATH=/root/.local/share/financas/financas.sqlite
     volumes:
       # token.json do OAuth2 (gerado por ./server -authorize) — D17
       - ${HOME}/.config/financas:/root/.config/financas
