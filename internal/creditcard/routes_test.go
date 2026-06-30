@@ -56,7 +56,7 @@ func newCCRouter(db *sql.DB, reader creditcard.CardTransactionReader) http.Handl
 		Archive:      creditcard.NewArchiveCreditCard(ccRepo),
 		ListInvoices: creditcard.NewListInvoices(ccRepo, payRepo, reader),
 		GetInvoice:   creditcard.NewGetInvoice(ccRepo, payRepo, reader),
-		PayInvoice:   creditcard.NewPayInvoice(ccRepo, payRepo, reader, ccFakeSubs{}),
+		AddPayment:   creditcard.NewAddInvoicePayment(ccRepo, payRepo, reader, ccFakeSubs{}),
 		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, payRepo, reader),
 		MonthSummary: creditcard.NewMonthlyCardSummary(ccRepo, reader),
 	})
@@ -160,12 +160,20 @@ func TestCreditCardRoutes_FullFlow(t *testing.T) {
 		t.Errorf("get invoice missing: got %d, want 404", code)
 	}
 
-	// Pay + undo
-	if code, resp := ccReq(t, router, http.MethodPatch, "/api/credit-cards/c1/invoices/2026-02/pay",
-		`{"payment_date":"2026-06-20","subcategory_id":"sub-trf-pgto"}`); code != http.StatusOK || resp["status"] != "paga" {
-		t.Errorf("pay: got %d body %v", code, resp)
+	// Pagar a fatura inteira (total 30000) → quitada; depois desfazer pelo id do pagamento.
+	code, resp := ccReq(t, router, http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments",
+		`{"amount":30000,"payment_date":"2026-06-20","subcategory_id":"sub-trf-pgto"}`)
+	if code != http.StatusOK || resp["payment_status"] != "paga" {
+		t.Fatalf("pay: got %d body %v", code, resp)
 	}
-	if code, _ := ccReq(t, router, http.MethodDelete, "/api/credit-cards/c1/invoices/2026-02/pay", ""); code != http.StatusOK {
+	payID := ""
+	if ps, ok := resp["payments"].([]any); ok && len(ps) == 1 {
+		payID, _ = ps[0].(map[string]any)["id"].(string)
+	}
+	if payID == "" {
+		t.Fatalf("id do pagamento ausente: %v", resp["payments"])
+	}
+	if code, _ := ccReq(t, router, http.MethodDelete, "/api/credit-cards/c1/invoices/2026-02/payments/"+payID, ""); code != http.StatusOK {
 		t.Errorf("undo: got %d", code)
 	}
 
@@ -197,10 +205,11 @@ func TestCreditCardRoutes_ErrorPaths(t *testing.T) {
 		{"summary missing card", http.MethodGet, "/api/credit-cards/nope/summary?year=2026&month=1", "", http.StatusNotFound},
 		{"invoices missing card", http.MethodGet, "/api/credit-cards/nope/invoices", "", http.StatusNotFound},
 		{"get invoice missing card", http.MethodGet, "/api/credit-cards/nope/invoices/2026-01", "", http.StatusNotFound},
-		{"pay bad json", http.MethodPatch, "/api/credit-cards/c1/invoices/2026-02/pay", `{`, http.StatusBadRequest},
-		{"pay missing subcategory", http.MethodPatch, "/api/credit-cards/c1/invoices/2026-02/pay", `{"payment_date":"2026-06-20"}`, http.StatusBadRequest},
-		{"pay nonexistent invoice", http.MethodPatch, "/api/credit-cards/c1/invoices/2099-01/pay", `{"payment_date":"2026-06-20","subcategory_id":"s"}`, http.StatusNotFound},
-		{"undo without payment", http.MethodDelete, "/api/credit-cards/c1/invoices/2099-01/pay", "", http.StatusNotFound},
+		{"pay bad json", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments", `{`, http.StatusBadRequest},
+		{"pay missing subcategory", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments", `{"amount":100,"payment_date":"2026-06-20"}`, http.StatusBadRequest},
+		{"pay invalid amount", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments", `{"amount":0,"payment_date":"2026-06-20","subcategory_id":"s"}`, http.StatusBadRequest},
+		{"pay nonexistent invoice", http.MethodPost, "/api/credit-cards/c1/invoices/2099-01/payments", `{"amount":100,"payment_date":"2026-06-20","subcategory_id":"s"}`, http.StatusNotFound},
+		{"undo nonexistent payment", http.MethodDelete, "/api/credit-cards/c1/invoices/2099-01/payments/nope", "", http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		if code, _ := ccReq(t, router, tc.method, tc.path, tc.body); code != tc.want {
@@ -244,17 +253,16 @@ func TestCreditCardRepo_DBErrors(t *testing.T) {
 	if err := ccRepo.Delete(ctx, "c"); err == nil {
 		t.Error("Delete deveria falhar")
 	}
-	if _, err := payRepo.Get(ctx, "c", "2026-01"); err == nil {
-		t.Error("payment Get deveria falhar")
-	}
 	if _, err := payRepo.ListByCard(ctx, "c"); err == nil {
 		t.Error("payment ListByCard deveria falhar")
 	}
-	if err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{CardID: "c", Reference: "2026-01", Payment: mkPaymentTxn("p")}); err == nil {
-		t.Error("PayInvoiceAtomic deveria falhar")
+	if err := payRepo.AddPaymentAtomic(ctx, creditcard.AtomicAddPaymentInput{
+		CardID: "c", Entry: creditcard.InvoicePayment{ID: "e", Reference: "2026-01", Amount: 100}, Payment: mkPaymentTxn("p"),
+	}); err == nil {
+		t.Error("AddPaymentAtomic deveria falhar")
 	}
-	if err := payRepo.UndoPaymentAtomic(ctx, creditcard.AtomicUndoInput{CardID: "c", Reference: "2026-01"}); err == nil {
-		t.Error("UndoPaymentAtomic deveria falhar")
+	if err := payRepo.RemovePaymentAtomic(ctx, creditcard.AtomicRemovePaymentInput{PaymentID: "e"}); err == nil {
+		t.Error("RemovePaymentAtomic deveria falhar")
 	}
 }
 

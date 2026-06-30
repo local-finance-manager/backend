@@ -33,11 +33,11 @@ func newTestDB(t *testing.T) *sql.DB {
 			color TEXT, icon TEXT, archived INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE credit_card_invoice_payments (
+		`CREATE TABLE credit_card_invoice_payment (
+			id TEXT PRIMARY KEY,
 			credit_card_id TEXT NOT NULL REFERENCES credit_cards(id) ON DELETE CASCADE,
-			reference TEXT NOT NULL, payment_date TEXT NOT NULL,
-			transaction_id TEXT, created_at TEXT NOT NULL,
-			PRIMARY KEY (credit_card_id, reference)
+			reference TEXT NOT NULL, amount INTEGER NOT NULL,
+			payment_date TEXT NOT NULL, transaction_id TEXT, created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE transactions (
 			id TEXT PRIMARY KEY, title TEXT NOT NULL,
@@ -261,63 +261,19 @@ func TestCardRepo_List_Pagination(t *testing.T) {
 
 // ─── InvoicePayment ─────────────────────────────────────────────────────────
 
-func TestPaymentRepo_UpsertGetDelete(t *testing.T) {
-	db := newTestDB(t)
-	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
-	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
-	ctx := context.Background()
-	cardRepo.Create(ctx, mkCard("c1", "Card", false))
-
-	p := creditcard.InvoicePayment{Reference: "2026-06", PaymentDate: "2026-06-10", CreatedAt: time.Now().UTC()}
-	if err := payRepo.Upsert(ctx, "c1", p); err != nil {
-		t.Fatalf("upsert: %v", err)
+// addEntry registra um pagamento no ledger via AddPaymentAtomic (helper de teste).
+func addEntry(t *testing.T, payRepo *creditcard.SQLiteInvoicePaymentRepository, cardID, ref, payID string, amount int64) {
+	t.Helper()
+	pay := mkPaymentTxn(payID)
+	pay.Amount = amount
+	entry := creditcard.InvoicePayment{
+		ID: "e-" + payID, Reference: ref, Amount: amount, PaymentDate: pay.PaymentDate,
+		TransactionID: &pay.ID, CreatedAt: time.Now().UTC(),
 	}
-
-	got, err := payRepo.Get(ctx, "c1", "2026-06")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got == nil || got.PaymentDate != "2026-06-10" {
-		t.Errorf("unexpected payment: %+v", got)
-	}
-
-	// upsert again updates
-	p.PaymentDate = "2026-06-11"
-	p.TransactionID = ptrS("txn-1")
-	if err := payRepo.Upsert(ctx, "c1", p); err != nil {
-		t.Fatalf("re-upsert: %v", err)
-	}
-	got, _ = payRepo.Get(ctx, "c1", "2026-06")
-	if got.PaymentDate != "2026-06-11" || got.TransactionID == nil || *got.TransactionID != "txn-1" {
-		t.Errorf("update via upsert falhou: %+v", got)
-	}
-
-	if err := payRepo.Delete(ctx, "c1", "2026-06"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	got, _ = payRepo.Get(ctx, "c1", "2026-06")
-	if got != nil {
-		t.Error("expected nil after delete")
-	}
-}
-
-func TestPaymentRepo_GetMissingReturnsNil(t *testing.T) {
-	db := newTestDB(t)
-	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
-	got, err := payRepo.Get(context.Background(), "c1", "2026-01")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != nil {
-		t.Error("expected nil for missing payment")
-	}
-}
-
-func TestPaymentRepo_DeleteNotFound(t *testing.T) {
-	db := newTestDB(t)
-	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
-	if err := payRepo.Delete(context.Background(), "c1", "2026-01"); err == nil {
-		t.Error("expected not-found")
+	if err := payRepo.AddPaymentAtomic(context.Background(), creditcard.AtomicAddPaymentInput{
+		CardID: cardID, Entry: entry, Payment: pay,
+	}); err != nil {
+		t.Fatalf("addEntry %s: %v", payID, err)
 	}
 }
 
@@ -328,15 +284,16 @@ func TestPaymentRepo_ListByCard(t *testing.T) {
 	ctx := context.Background()
 	cardRepo.Create(ctx, mkCard("c1", "Card", false))
 
-	payRepo.Upsert(ctx, "c1", creditcard.InvoicePayment{Reference: "2026-05", PaymentDate: "2026-05-10", CreatedAt: time.Now().UTC()})
-	payRepo.Upsert(ctx, "c1", creditcard.InvoicePayment{Reference: "2026-06", PaymentDate: "2026-06-10", CreatedAt: time.Now().UTC()})
+	addEntry(t, payRepo, "c1", "2026-05", "pay-a", 10000)
+	addEntry(t, payRepo, "c1", "2026-06", "pay-b", 20000)
+	addEntry(t, payRepo, "c1", "2026-06", "pay-c", 5000) // 2º pagamento da mesma fatura (ledger)
 
 	m, err := payRepo.ListByCard(ctx, "c1")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(m) != 2 || m["2026-05"] == nil || m["2026-06"] == nil {
-		t.Errorf("expected 2 payments keyed by reference: %+v", m)
+	if len(m["2026-05"]) != 1 || len(m["2026-06"]) != 2 {
+		t.Errorf("ledger por referência inesperado: %+v", m)
 	}
 }
 
@@ -346,9 +303,9 @@ func TestPaymentRepo_CascadeOnCardDelete(t *testing.T) {
 	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
 	ctx := context.Background()
 	cardRepo.Create(ctx, mkCard("c1", "Card", false))
-	payRepo.Upsert(ctx, "c1", creditcard.InvoicePayment{Reference: "2026-06", PaymentDate: "2026-06-10", CreatedAt: time.Now().UTC()})
+	addEntry(t, payRepo, "c1", "2026-06", "pay-a", 10000)
 
-	// cartão sem lançamentos pode ser excluído → pagamentos vão junto (CASCADE)
+	// cartão sem lançamentos de compra pode ser excluído → pagamentos vão junto (CASCADE)
 	if err := cardRepo.Delete(ctx, "c1"); err != nil {
 		t.Fatalf("delete card: %v", err)
 	}
@@ -390,7 +347,7 @@ func txnStatus(t *testing.T, db *sql.DB, id string) (status string, payDate sql.
 	return status, payDate
 }
 
-func TestInvoicePaymentRepo_PayInvoiceAtomic(t *testing.T) {
+func TestInvoicePaymentRepo_AddPaymentAtomic_FullSettle(t *testing.T) {
 	db := newTestDB(t)
 	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
 	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
@@ -399,15 +356,16 @@ func TestInvoicePaymentRepo_PayInvoiceAtomic(t *testing.T) {
 	insertCompra(t, db, "compra-1", "pendente", 20000)
 	insertCompra(t, db, "compra-2", "pendente", 10000)
 
-	err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{
-		CardID: "c1", Reference: "2026-07", RealizeIDs: []string{"compra-1", "compra-2"},
-		RealizeAt: "2026-07-15", Payment: mkPaymentTxn("pay-1"),
+	pay := mkPaymentTxn("pay-1") // amount 30000
+	entry := creditcard.InvoicePayment{ID: "e1", Reference: "2026-07", Amount: 30000, PaymentDate: "2026-07-15", TransactionID: &pay.ID, CreatedAt: time.Now().UTC()}
+	err := payRepo.AddPaymentAtomic(ctx, creditcard.AtomicAddPaymentInput{
+		CardID: "c1", Entry: entry, Payment: pay,
+		RealizeIDs: []string{"compra-1", "compra-2"}, RealizeAt: "2026-07-15",
 	})
 	if err != nil {
-		t.Fatalf("PayInvoiceAtomic: %v", err)
+		t.Fatalf("AddPaymentAtomic: %v", err)
 	}
-
-	// 1. compras realizadas com a data informada.
+	// 1. compras realizadas com a data informada (quitou a fatura).
 	for _, id := range []string{"compra-1", "compra-2"} {
 		st, pd := txnStatus(t, db, id)
 		if st != "realizado" || pd.String != "2026-07-15" {
@@ -424,91 +382,103 @@ func TestInvoicePaymentRepo_PayInvoiceAtomic(t *testing.T) {
 	if typ != "transferencia" || status != "realizado" || cardID.Valid {
 		t.Errorf("payment txn inesperado: type=%s status=%s card=%v", typ, status, cardID)
 	}
-	// 3. registro de pagamento apontando para o lançamento.
-	rec, _ := payRepo.Get(ctx, "c1", "2026-07")
-	if rec == nil || rec.TransactionID == nil || *rec.TransactionID != "pay-1" {
-		t.Errorf("registro de pagamento inesperado: %+v", rec)
+	// 3. entrada no ledger.
+	m, _ := payRepo.ListByCard(ctx, "c1")
+	if len(m["2026-07"]) != 1 || m["2026-07"][0].Amount != 30000 {
+		t.Errorf("ledger inesperado: %+v", m["2026-07"])
 	}
 }
 
-// TestInvoicePaymentRepo_PayInvoiceAtomic_Rollback força falha na inserção do lançamento de
-// pagamento (id duplicado) e prova que TUDO é revertido (RF-PAGFAT-04).
-func TestInvoicePaymentRepo_PayInvoiceAtomic_Rollback(t *testing.T) {
+func TestInvoicePaymentRepo_AddPaymentAtomic_Partial(t *testing.T) {
 	db := newTestDB(t)
 	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
 	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
 	ctx := context.Background()
 	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
 	insertCompra(t, db, "compra-1", "pendente", 20000)
-	insertCompra(t, db, "dup", "realizado", 5000) // id colide com o do lançamento de pagamento
 
-	err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{
-		CardID: "c1", Reference: "2026-07", RealizeIDs: []string{"compra-1"},
-		RealizeAt: "2026-07-15", Payment: mkPaymentTxn("dup"), // PRIMARY KEY conflict
+	pay := mkPaymentTxn("pay-1")
+	pay.Amount = 8000
+	entry := creditcard.InvoicePayment{ID: "e1", Reference: "2026-07", Amount: 8000, PaymentDate: "2026-07-15", TransactionID: &pay.ID, CreatedAt: time.Now().UTC()}
+	// parcial → sem RealizeIDs (não quita).
+	if err := payRepo.AddPaymentAtomic(ctx, creditcard.AtomicAddPaymentInput{CardID: "c1", Entry: entry, Payment: pay}); err != nil {
+		t.Fatalf("AddPaymentAtomic: %v", err)
+	}
+	if st, _ := txnStatus(t, db, "compra-1"); st != "pendente" {
+		t.Errorf("compra deveria seguir pendente no parcial, got %s", st)
+	}
+}
+
+// _Rollback força falha na inserção do lançamento de pagamento (id duplicado) e prova
+// que TUDO é revertido (RF-PAGFAT-04).
+func TestInvoicePaymentRepo_AddPaymentAtomic_Rollback(t *testing.T) {
+	db := newTestDB(t)
+	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
+	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	ctx := context.Background()
+	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
+	insertCompra(t, db, "compra-1", "pendente", 20000)
+	insertCompra(t, db, "dup", "realizado", 5000) // colide com o id do lançamento de pagamento
+
+	pay := mkPaymentTxn("dup")
+	entry := creditcard.InvoicePayment{ID: "e1", Reference: "2026-07", Amount: 30000, PaymentDate: "2026-07-15", TransactionID: &pay.ID, CreatedAt: time.Now().UTC()}
+	err := payRepo.AddPaymentAtomic(ctx, creditcard.AtomicAddPaymentInput{
+		CardID: "c1", Entry: entry, Payment: pay, RealizeIDs: []string{"compra-1"}, RealizeAt: "2026-07-15",
 	})
 	if err == nil {
 		t.Fatal("esperava erro por id duplicado")
 	}
-	// rollback: compra-1 continua pendente, sem data; nenhum registro de pagamento.
+	// rollback total: compra-1 segue pendente; sem entrada no ledger.
 	st, pd := txnStatus(t, db, "compra-1")
 	if st != "pendente" || pd.Valid {
 		t.Errorf("rollback falhou: compra-1 status=%s payment_date=%v", st, pd)
 	}
-	if rec, _ := payRepo.Get(ctx, "c1", "2026-07"); rec != nil {
-		t.Errorf("registro de pagamento não deveria existir após rollback: %+v", rec)
+	if m, _ := payRepo.ListByCard(ctx, "c1"); len(m["2026-07"]) != 0 {
+		t.Errorf("ledger não deveria ter entrada após rollback: %+v", m["2026-07"])
 	}
 }
 
-func TestInvoicePaymentRepo_UndoPaymentAtomic(t *testing.T) {
+func TestInvoicePaymentRepo_RemovePaymentAtomic(t *testing.T) {
 	db := newTestDB(t)
 	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
 	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
 	ctx := context.Background()
 	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
 	insertCompra(t, db, "compra-1", "pendente", 20000)
-	// pagar primeiro
-	if err := payRepo.PayInvoiceAtomic(ctx, creditcard.AtomicPayInput{
-		CardID: "c1", Reference: "2026-07", RealizeIDs: []string{"compra-1"},
-		RealizeAt: "2026-07-15", Payment: mkPaymentTxn("pay-1"),
+	pay := mkPaymentTxn("pay-1")
+	pay.Amount = 20000
+	entry := creditcard.InvoicePayment{ID: "e1", Reference: "2026-07", Amount: 20000, PaymentDate: "2026-07-15", TransactionID: &pay.ID, CreatedAt: time.Now().UTC()}
+	if err := payRepo.AddPaymentAtomic(ctx, creditcard.AtomicAddPaymentInput{
+		CardID: "c1", Entry: entry, Payment: pay, RealizeIDs: []string{"compra-1"}, RealizeAt: "2026-07-15",
 	}); err != nil {
-		t.Fatalf("pay: %v", err)
+		t.Fatalf("add: %v", err)
 	}
 
-	// desfazer
-	if err := payRepo.UndoPaymentAtomic(ctx, creditcard.AtomicUndoInput{
-		CardID: "c1", Reference: "2026-07", RevertIDs: []string{"compra-1"}, PaymentTxnID: "pay-1",
+	// desfazer: reabre compra-1 e exclui o lançamento de pagamento.
+	if err := payRepo.RemovePaymentAtomic(ctx, creditcard.AtomicRemovePaymentInput{
+		PaymentID: "e1", PaymentTxnID: "pay-1", RevertIDs: []string{"compra-1"},
 	}); err != nil {
-		t.Fatalf("undo: %v", err)
+		t.Fatalf("remove: %v", err)
 	}
-
-	// compra volta para pendente, sem data.
 	st, pd := txnStatus(t, db, "compra-1")
 	if st != "pendente" || pd.Valid {
 		t.Errorf("undo: compra-1 status=%s payment_date=%v", st, pd)
 	}
-	// lançamento de pagamento excluído.
 	var n int
 	db.QueryRow("SELECT COUNT(*) FROM transactions WHERE id = 'pay-1'").Scan(&n)
 	if n != 0 {
 		t.Errorf("lançamento de pagamento deveria ter sido excluído")
 	}
-	// registro de pagamento removido.
-	if rec, _ := payRepo.Get(ctx, "c1", "2026-07"); rec != nil {
-		t.Errorf("registro de pagamento deveria ter sido removido")
+	if m, _ := payRepo.ListByCard(ctx, "c1"); len(m["2026-07"]) != 0 {
+		t.Errorf("entrada do ledger deveria ter sido removida")
 	}
 }
 
-func TestInvoicePaymentRepo_UndoPaymentAtomic_NotFound(t *testing.T) {
+func TestInvoicePaymentRepo_RemovePaymentAtomic_NotFound(t *testing.T) {
 	db := newTestDB(t)
-	cardRepo := creditcard.NewSQLiteCreditCardRepository(db)
 	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
-	ctx := context.Background()
-	cardRepo.Create(ctx, mkCard("c1", "Nubank", false))
-
-	err := payRepo.UndoPaymentAtomic(ctx, creditcard.AtomicUndoInput{
-		CardID: "c1", Reference: "2026-07", PaymentTxnID: "x",
-	})
-	if err == nil {
-		t.Error("esperava ErrInvoiceNotFound quando não há registro de pagamento")
+	if err := payRepo.RemovePaymentAtomic(context.Background(),
+		creditcard.AtomicRemovePaymentInput{PaymentID: "nope"}); err != creditcard.ErrPaymentNotFound {
+		t.Errorf("esperava ErrPaymentNotFound, got %v", err)
 	}
 }
