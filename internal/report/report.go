@@ -22,9 +22,9 @@ const hardLockDays = 90
 type LockState string
 
 const (
-	StateOpen       LockState = "aberto"             // sem linha de fechamento
-	StateAdjustable LockState = "fechado_ajustavel"  // fechado, hoje <= hard_lock_at
-	StateBlocked    LockState = "fechado_bloqueado"  // fechado, hoje > hard_lock_at
+	StateOpen       LockState = "aberto"            // sem linha de fechamento
+	StateAdjustable LockState = "fechado_ajustavel" // fechado, hoje <= hard_lock_at
+	StateBlocked    LockState = "fechado_bloqueado" // fechado, hoje > hard_lock_at
 )
 
 // ─── Erros de domínio ────────────────────────────────────────────────────────

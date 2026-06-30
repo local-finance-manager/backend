@@ -1,12 +1,27 @@
 package shared_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/local-finance-manager/backend/internal/shared"
 )
+
+// IncomeItem é serializado direto na resposta de /api/income/plan — o front lê em
+// camelCase. Guard contra regressão de tags faltando (bug do "R$ NaN").
+func TestIncomeItemJSONIsCamelCase(t *testing.T) {
+	b, err := json.Marshal(shared.IncomeItem{TransactionID: "t1", Title: "Salário", Amount: 500000, Status: "realizado"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(b)
+	want := `{"transactionId":"t1","title":"Salário","amount":500000,"status":"realizado"}`
+	if got != want {
+		t.Errorf("JSON inesperado:\n got=%s\nwant=%s", got, want)
+	}
+}
 
 func TestDefaultPagination(t *testing.T) {
 	p := shared.DefaultPagination()

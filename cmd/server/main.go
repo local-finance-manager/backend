@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/cors"
 
 	"github.com/local-finance-manager/backend/internal/backup"
+	"github.com/local-finance-manager/backend/internal/budget"
 	"github.com/local-finance-manager/backend/internal/category"
 	"github.com/local-finance-manager/backend/internal/config"
 	"github.com/local-finance-manager/backend/internal/creditcard"
@@ -205,15 +206,27 @@ func run(log *slog.Logger) error {
 	transactionRepo := transaction.NewSQLiteRepository(db)
 	// reportService é o MonthGuard injetado: bloqueia mês fechado-bloqueado e
 	// recalcula o snapshot de mês fechado-ajustável após alterações (RF-REL-07..10).
+	createTransaction := transaction.NewCreateTransaction(transactionRepo, catFacade, cardChecker, reportService)
+	deleteTransaction := transaction.NewDeleteTransaction(transactionRepo, reportService)
 	transactionHandler := transaction.NewHandler(transaction.HandlerDeps{
 		GetTransaction:     transaction.NewGetTransaction(transactionRepo),
 		ListTransactions:   transaction.NewListTransactions(transactionRepo),
-		CreateTransaction:  transaction.NewCreateTransaction(transactionRepo, catFacade, cardChecker, reportService),
+		CreateTransaction:  createTransaction,
 		UpdateTransaction:  transaction.NewUpdateTransaction(transactionRepo, catFacade, cardChecker, reportService),
 		ConfirmTransaction: transaction.NewConfirmTransaction(transactionRepo, reportService),
 		CancelTransaction:  transaction.NewCancelTransaction(transactionRepo, reportService),
-		DeleteTransaction:  transaction.NewDeleteTransaction(transactionRepo, reportService),
+		DeleteTransaction:  deleteTransaction,
 	})
+
+	// Alocação de receitas (budget): owner dos destinos/templates. Consome a renda do
+	// mês e cria/exclui lançamentos via ports do transaction (que aplicam o guard).
+	budgetService := budget.NewService(budget.Deps{
+		Repo:           budget.NewSQLiteRepository(db),
+		Income:         transaction.NewIncomeReader(db),
+		Txns:           transaction.NewBudgetWriter(createTransaction, deleteTransaction),
+		InvestSubcatID: "sub-trf-aporte", // "Aporte em Investimentos" (seed transferência) — A4
+	})
+	budgetHandler := budget.NewHandler(budgetService)
 
 	creditCardHandler := creditcard.NewHandler(creditcard.HandlerDeps{
 		Create:       creditcard.NewCreateCreditCard(ccRepo),
@@ -273,6 +286,7 @@ func run(log *slog.Logger) error {
 	r.Route("/api/credit-cards", creditcard.Routes(creditCardHandler))
 	r.Route("/api/installments", installment.Routes(installmentHandler))
 	r.Route("/api/reports", report.Routes(reportHandler))
+	r.Route("/api/income", budget.Routes(budgetHandler))
 	r.Route("/api/backup", backup.Routes(backup.NewHandler(backupSvc)))
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
