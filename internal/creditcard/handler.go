@@ -35,7 +35,7 @@ type HandlerDeps struct {
 	Archive      ArchiveCreditCardUseCase
 	ListInvoices ListInvoicesUseCase
 	GetInvoice   GetInvoiceUseCase
-	PayInvoice   PayInvoiceUseCase
+	AddPayment   AddInvoicePaymentUseCase
 	UndoPayment  UndoInvoicePaymentUseCase
 	MonthSummary MonthlyCardSummaryUseCase
 }
@@ -83,7 +83,9 @@ type categoryBreakdownResp struct {
 }
 
 type paymentResp struct {
+	ID            string  `json:"id"`
 	Reference     string  `json:"reference"`
+	Amount        int64   `json:"amount"`
 	PaymentDate   string  `json:"payment_date"`
 	TransactionID *string `json:"transaction_id"`
 	CreatedAt     string  `json:"created_at"`
@@ -96,8 +98,11 @@ type invoiceResp struct {
 	DueDate           string                  `json:"due_date"`
 	Status            string                  `json:"status"`
 	Total             int64                   `json:"total"`
+	PaidAmount        int64                   `json:"paid_amount"`
+	OutstandingAmount int64                   `json:"outstanding_amount"`
+	PaymentStatus     string                  `json:"payment_status"`
 	Count             int                     `json:"count"`
-	Payment           *paymentResp            `json:"payment"`
+	Payments          []paymentResp           `json:"payments"`
 	CategoryBreakdown []categoryBreakdownResp `json:"category_breakdown"`
 }
 
@@ -150,6 +155,7 @@ type cardReq struct {
 }
 
 type payInvoiceReq struct {
+	Amount        int64   `json:"amount"`
 	PaymentDate   string  `json:"payment_date"`
 	SubcategoryID string  `json:"subcategory_id"`
 	Title         string  `json:"title"`
@@ -181,20 +187,24 @@ func toBreakdownResp(bs []CategoryBreakdown) []categoryBreakdownResp {
 }
 
 func toInvoiceResp(inv Invoice) invoiceResp {
-	var pay *paymentResp
-	if inv.Payment != nil {
-		pay = &paymentResp{
-			Reference:     inv.Payment.Reference,
-			PaymentDate:   inv.Payment.PaymentDate,
-			TransactionID: inv.Payment.TransactionID,
-			CreatedAt:     inv.Payment.CreatedAt.UTC().Format(time.RFC3339),
+	payments := make([]paymentResp, len(inv.Payments))
+	for i, p := range inv.Payments {
+		payments[i] = paymentResp{
+			ID:            p.ID,
+			Reference:     p.Reference,
+			Amount:        p.Amount,
+			PaymentDate:   p.PaymentDate,
+			TransactionID: p.TransactionID,
+			CreatedAt:     p.CreatedAt.UTC().Format(time.RFC3339),
 		}
 	}
 	return invoiceResp{
 		Reference: inv.Reference, CycleStart: inv.CycleStart,
 		ClosingDate: inv.ClosingDate, DueDate: inv.DueDate,
-		Status: string(inv.Status), Total: inv.Total, Count: inv.Count,
-		Payment: pay, CategoryBreakdown: toBreakdownResp(inv.CategoryBreakdown),
+		Status: string(inv.Status), Total: inv.Total,
+		PaidAmount: inv.PaidAmount, OutstandingAmount: inv.OutstandingAmount,
+		PaymentStatus: string(inv.PaymentStatus), Count: inv.Count,
+		Payments: payments, CategoryBreakdown: toBreakdownResp(inv.CategoryBreakdown),
 	}
 }
 
@@ -361,16 +371,17 @@ func (h *Handler) GetInvoice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// PayInvoice trata PATCH /api/credit-cards/{id}/invoices/{reference}/pay
-func (h *Handler) PayInvoice(w http.ResponseWriter, r *http.Request) {
+// AddInvoicePayment trata POST /api/credit-cards/{id}/invoices/{reference}/payments
+func (h *Handler) AddInvoicePayment(w http.ResponseWriter, r *http.Request) {
 	var req payInvoiceReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		domainerr.WriteError(w, domainerr.NewBadRequest("corpo da requisição inválido", domainerr.WithDisplayable()))
 		return
 	}
-	inv, err := h.deps.PayInvoice.Execute(r.Context(), PayInvoiceInput{
+	inv, err := h.deps.AddPayment.Execute(r.Context(), AddInvoicePaymentInput{
 		CardID:        chi.URLParam(r, "id"),
 		Reference:     chi.URLParam(r, "reference"),
+		Amount:        req.Amount,
 		PaymentDate:   req.PaymentDate,
 		SubcategoryID: req.SubcategoryID,
 		Title:         req.Title,
@@ -383,9 +394,10 @@ func (h *Handler) PayInvoice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toInvoiceResp(inv))
 }
 
-// UndoInvoicePayment trata DELETE /api/credit-cards/{id}/invoices/{reference}/pay
+// UndoInvoicePayment trata DELETE /api/credit-cards/{id}/invoices/{reference}/payments/{paymentId}
 func (h *Handler) UndoInvoicePayment(w http.ResponseWriter, r *http.Request) {
-	inv, err := h.deps.UndoPayment.Execute(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "reference"))
+	inv, err := h.deps.UndoPayment.Execute(r.Context(),
+		chi.URLParam(r, "id"), chi.URLParam(r, "reference"), chi.URLParam(r, "paymentId"))
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return

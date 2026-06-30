@@ -151,71 +151,32 @@ func NewSQLiteInvoicePaymentRepository(db *sql.DB) *SQLiteInvoicePaymentReposito
 }
 
 const selectPaymentCols = `
-SELECT reference, payment_date, transaction_id, created_at
-FROM credit_card_invoice_payments`
+SELECT id, reference, amount, payment_date, transaction_id, created_at
+FROM credit_card_invoice_payment`
 
-func (r *SQLiteInvoicePaymentRepository) Get(ctx context.Context, cardID, reference string) (*InvoicePayment, error) {
-	row := r.db.QueryRowContext(ctx,
-		selectPaymentCols+" WHERE credit_card_id = ? AND reference = ?", cardID, reference)
-	p, err := scanPayment(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("creditcard repo: get payment: %w", err)
-	}
-	return &p, nil
-}
-
-func (r *SQLiteInvoicePaymentRepository) ListByCard(ctx context.Context, cardID string) (map[string]*InvoicePayment, error) {
-	rows, err := r.db.QueryContext(ctx, selectPaymentCols+" WHERE credit_card_id = ?", cardID)
+func (r *SQLiteInvoicePaymentRepository) ListByCard(ctx context.Context, cardID string) (map[string][]InvoicePayment, error) {
+	rows, err := r.db.QueryContext(ctx,
+		selectPaymentCols+" WHERE credit_card_id = ? ORDER BY payment_date, created_at", cardID)
 	if err != nil {
 		return nil, fmt.Errorf("creditcard repo: list payments: %w", err)
 	}
 	defer rows.Close()
 
-	out := map[string]*InvoicePayment{}
+	out := map[string][]InvoicePayment{}
 	for rows.Next() {
 		p, err := scanPayment(rows)
 		if err != nil {
 			return nil, fmt.Errorf("creditcard repo: list payments scan: %w", err)
 		}
-		pCopy := p
-		out[p.Reference] = &pCopy
+		out[p.Reference] = append(out[p.Reference], p)
 	}
 	return out, rows.Err()
 }
 
-const upsertPaymentSQL = `
-INSERT INTO credit_card_invoice_payments (credit_card_id, reference, payment_date, transaction_id, created_at)
-VALUES (?,?,?,?,?)
-ON CONFLICT(credit_card_id, reference) DO UPDATE SET
-    payment_date = excluded.payment_date,
-    transaction_id = excluded.transaction_id`
-
-func (r *SQLiteInvoicePaymentRepository) Upsert(ctx context.Context, cardID string, p InvoicePayment) error {
-	_, err := r.db.ExecContext(ctx, upsertPaymentSQL,
-		cardID, p.Reference, p.PaymentDate, toNullString(ptrVal(p.TransactionID)),
-		p.CreatedAt.UTC().Format(time.RFC3339),
-	)
-	if err != nil {
-		return fmt.Errorf("creditcard repo: upsert payment: %w", err)
-	}
-	return nil
-}
-
-func (r *SQLiteInvoicePaymentRepository) Delete(ctx context.Context, cardID, reference string) error {
-	res, err := r.db.ExecContext(ctx,
-		"DELETE FROM credit_card_invoice_payments WHERE credit_card_id = ? AND reference = ?",
-		cardID, reference)
-	if err != nil {
-		return fmt.Errorf("creditcard repo: delete payment: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrInvoiceNotFound
-	}
-	return nil
-}
+const insertLedgerSQL = `
+INSERT INTO credit_card_invoice_payment
+	(id, credit_card_id, reference, amount, payment_date, transaction_id, created_at)
+VALUES (?,?,?,?,?,?,?)`
 
 // ─── Pagamento atômico de fatura (E1) ───────────────────────────────────────
 // Estes dois métodos escrevem na tabela `transactions` (posse do módulo transaction)
@@ -229,16 +190,33 @@ INSERT INTO transactions
 	 competence_date, payment_date, created_at, updated_at)
 VALUES (?,?,?,?,?,?,?, 'realizado', ?,?,?,?)`
 
-func (r *SQLiteInvoicePaymentRepository) PayInvoiceAtomic(ctx context.Context, in AtomicPayInput) error {
+func (r *SQLiteInvoicePaymentRepository) AddPaymentAtomic(ctx context.Context, in AtomicAddPaymentInput) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("creditcard repo: pay atomic: begin: %w", err)
+		return fmt.Errorf("creditcard repo: add payment: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op após Commit
 
 	ts := in.Payment.CreatedAt.UTC().Format(time.RFC3339)
 
-	// 1. Baixa em lote: compras pendentes do ciclo → realizado, com a data informada.
+	// 1. Lançamento de caixa do pagamento (realizado; sem cartão; type da subcategoria).
+	p := in.Payment
+	if _, err := tx.ExecContext(ctx, insertPaymentTxnSQL,
+		p.ID, p.Title, toNullString(ptrVal(p.Description)), p.Amount, p.Type, p.SubcategoryID,
+		p.PaymentMethod, p.CompetenceDate, p.PaymentDate, ts, ts,
+	); err != nil {
+		return fmt.Errorf("creditcard repo: add payment: insert payment txn: %w", err)
+	}
+
+	// 2. Entrada no ledger de pagamentos da fatura.
+	e := in.Entry
+	if _, err := tx.ExecContext(ctx, insertLedgerSQL,
+		e.ID, in.CardID, e.Reference, e.Amount, e.PaymentDate, toNullString(ptrVal(e.TransactionID)), ts,
+	); err != nil {
+		return fmt.Errorf("creditcard repo: add payment: insert ledger: %w", err)
+	}
+
+	// 3. Se o pagamento quitou a fatura: baixa em lote das compras pendentes do ciclo.
 	if len(in.RealizeIDs) > 0 {
 		q := "UPDATE transactions SET status='realizado', payment_date=?, updated_at=? WHERE id IN (" +
 			placeholders(len(in.RealizeIDs)) + ")"
@@ -248,42 +226,42 @@ func (r *SQLiteInvoicePaymentRepository) PayInvoiceAtomic(ctx context.Context, i
 			args = append(args, id)
 		}
 		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
-			return fmt.Errorf("creditcard repo: pay atomic: realize: %w", err)
+			return fmt.Errorf("creditcard repo: add payment: realize: %w", err)
 		}
 	}
 
-	// 2. Lançamento de pagamento (realizado; sem cartão; type derivado da subcategoria).
-	p := in.Payment
-	if _, err := tx.ExecContext(ctx, insertPaymentTxnSQL,
-		p.ID, p.Title, toNullString(ptrVal(p.Description)), p.Amount, p.Type, p.SubcategoryID,
-		p.PaymentMethod, p.CompetenceDate, p.PaymentDate, ts, ts,
-	); err != nil {
-		return fmt.Errorf("creditcard repo: pay atomic: insert payment txn: %w", err)
-	}
-
-	// 3. Registro de pagamento da fatura, apontando para o lançamento criado.
-	if _, err := tx.ExecContext(ctx, upsertPaymentSQL,
-		in.CardID, in.Reference, p.PaymentDate, p.ID, ts,
-	); err != nil {
-		return fmt.Errorf("creditcard repo: pay atomic: upsert payment: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("creditcard repo: pay atomic: commit: %w", err)
+		return fmt.Errorf("creditcard repo: add payment: commit: %w", err)
 	}
 	return nil
 }
 
-func (r *SQLiteInvoicePaymentRepository) UndoPaymentAtomic(ctx context.Context, in AtomicUndoInput) error {
+func (r *SQLiteInvoicePaymentRepository) RemovePaymentAtomic(ctx context.Context, in AtomicRemovePaymentInput) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("creditcard repo: undo atomic: begin: %w", err)
+		return fmt.Errorf("creditcard repo: remove payment: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op após Commit
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// 1. Compras realizadas do ciclo → pendente, limpando payment_date.
+	// 1. Exclui a entrada do ledger (deve existir).
+	res, err := tx.ExecContext(ctx, "DELETE FROM credit_card_invoice_payment WHERE id = ?", in.PaymentID)
+	if err != nil {
+		return fmt.Errorf("creditcard repo: remove payment: delete ledger: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPaymentNotFound
+	}
+
+	// 2. Exclui o lançamento de caixa do pagamento.
+	if in.PaymentTxnID != "" {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM transactions WHERE id = ?", in.PaymentTxnID); err != nil {
+			return fmt.Errorf("creditcard repo: remove payment: delete payment txn: %w", err)
+		}
+	}
+
+	// 3. Se a fatura deixou de estar quitada: compras realizado→pendente.
 	if len(in.RevertIDs) > 0 {
 		q := "UPDATE transactions SET status='pendente', payment_date=NULL, updated_at=? WHERE id IN (" +
 			placeholders(len(in.RevertIDs)) + ")"
@@ -293,30 +271,12 @@ func (r *SQLiteInvoicePaymentRepository) UndoPaymentAtomic(ctx context.Context, 
 			args = append(args, id)
 		}
 		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
-			return fmt.Errorf("creditcard repo: undo atomic: revert: %w", err)
+			return fmt.Errorf("creditcard repo: remove payment: revert: %w", err)
 		}
-	}
-
-	// 2. Exclui o lançamento de pagamento criado no pay.
-	if in.PaymentTxnID != "" {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM transactions WHERE id = ?", in.PaymentTxnID); err != nil {
-			return fmt.Errorf("creditcard repo: undo atomic: delete payment txn: %w", err)
-		}
-	}
-
-	// 3. Remove o registro de pagamento da fatura.
-	res, err := tx.ExecContext(ctx,
-		"DELETE FROM credit_card_invoice_payments WHERE credit_card_id = ? AND reference = ?",
-		in.CardID, in.Reference)
-	if err != nil {
-		return fmt.Errorf("creditcard repo: undo atomic: delete payment: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrInvoiceNotFound
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("creditcard repo: undo atomic: commit: %w", err)
+		return fmt.Errorf("creditcard repo: remove payment: commit: %w", err)
 	}
 	return nil
 }
@@ -358,7 +318,7 @@ func scanPayment(s scanner) (InvoicePayment, error) {
 	var p InvoicePayment
 	var txnID sql.NullString
 	var createdAt string
-	if err := s.Scan(&p.Reference, &p.PaymentDate, &txnID, &createdAt); err != nil {
+	if err := s.Scan(&p.ID, &p.Reference, &p.Amount, &p.PaymentDate, &txnID, &createdAt); err != nil {
 		return InvoicePayment{}, err
 	}
 	p.TransactionID = nullToPtr(txnID)

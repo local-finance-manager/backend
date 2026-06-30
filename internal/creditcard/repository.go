@@ -19,21 +19,20 @@ type CreditCardRepository interface {
 	SetArchived(ctx context.Context, id string, archived bool) error
 }
 
-// InvoicePaymentRepository persiste o status de pagamento de faturas fechadas
-// (única parte da fatura armazenada — D4).
+// InvoicePaymentRepository persiste o LEDGER de pagamentos de fatura (única parte da
+// fatura armazenada — D4). Cada fatura tem 0..N pagamentos (parcial/antecipado).
 type InvoicePaymentRepository interface {
-	Get(ctx context.Context, cardID, reference string) (*InvoicePayment, error)
-	ListByCard(ctx context.Context, cardID string) (map[string]*InvoicePayment, error)
-	Delete(ctx context.Context, cardID, reference string) error
-	// PayInvoiceAtomic executa, numa única transação (RF-PAGFAT-04): realiza em lote as
-	// compras do ciclo (RealizeIDs → realizado, payment_date), insere o lançamento de
-	// pagamento (Payment) e grava o registro em credit_card_invoice_payments. Escreve em
-	// transactions — exceção de posse de tabela documentada (Opção A, como installment).
-	PayInvoiceAtomic(ctx context.Context, in AtomicPayInput) error
-	// UndoPaymentAtomic reverte tudo numa transação: compras realizado→pendente (RevertIDs,
-	// limpando payment_date), exclui o lançamento de pagamento (PaymentTxnID) e remove o
-	// registro de pagamento. Retorna ErrInvoiceNotFound se não havia registro de pagamento.
-	UndoPaymentAtomic(ctx context.Context, in AtomicUndoInput) error
+	// ListByCard devolve os pagamentos do cartão agrupados por reference de fatura.
+	ListByCard(ctx context.Context, cardID string) (map[string][]InvoicePayment, error)
+	// AddPaymentAtomic registra um pagamento numa única transação: insere a entrada no
+	// ledger, cria o lançamento de caixa (Payment) e, SE o pagamento quitou a fatura,
+	// realiza em lote as compras do ciclo (RealizeIDs → realizado, payment_date).
+	// Escreve em transactions — exceção de posse de tabela documentada (Opção A).
+	AddPaymentAtomic(ctx context.Context, in AtomicAddPaymentInput) error
+	// RemovePaymentAtomic desfaz um pagamento numa transação: exclui a entrada do ledger
+	// (por id) e o lançamento de caixa, e — SE a fatura deixou de estar quitada — reverte
+	// as compras do ciclo (RevertIDs → pendente). ErrPaymentNotFound se o id não existir.
+	RemovePaymentAtomic(ctx context.Context, in AtomicRemovePaymentInput) error
 }
 
 // PaymentTxn descreve o lançamento de pagamento de fatura a ser criado (E1). Nasce
@@ -52,21 +51,20 @@ type PaymentTxn struct {
 	CreatedAt      time.Time
 }
 
-// AtomicPayInput é o payload de PayInvoiceAtomic.
-type AtomicPayInput struct {
+// AtomicAddPaymentInput é o payload de AddPaymentAtomic.
+type AtomicAddPaymentInput struct {
 	CardID     string
-	Reference  string
-	RealizeIDs []string // compras pendentes do ciclo a realizar
-	RealizeAt  string   // payment_date aplicada às compras realizadas (= PaymentDate)
-	Payment    PaymentTxn
+	Entry      InvoicePayment // entrada do ledger (id, reference, amount, payment_date, transaction_id)
+	Payment    PaymentTxn     // lançamento de caixa a criar (id == Entry.TransactionID)
+	RealizeIDs []string       // compras pendentes a realizar (só quando o pagamento quita a fatura)
+	RealizeAt  string         // payment_date aplicada às compras realizadas
 }
 
-// AtomicUndoInput é o payload de UndoPaymentAtomic.
-type AtomicUndoInput struct {
-	CardID       string
-	Reference    string
-	RevertIDs    []string // compras realizadas do ciclo a voltar para pendente
-	PaymentTxnID string   // lançamento de pagamento a excluir
+// AtomicRemovePaymentInput é o payload de RemovePaymentAtomic.
+type AtomicRemovePaymentInput struct {
+	PaymentID    string   // id da entrada do ledger a excluir
+	PaymentTxnID string   // lançamento de caixa a excluir
+	RevertIDs    []string // compras a voltar para pendente (só quando deixa de estar quitada)
 }
 
 // SubcategoryReader fornece o tipo de uma subcategoria (despesa/receita/transferencia),

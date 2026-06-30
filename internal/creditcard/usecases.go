@@ -38,12 +38,13 @@ type InvoiceDetail struct {
 	Pagination shared.PagedMeta
 }
 
-// PayInvoiceInput é o payload para registrar o pagamento de uma fatura (E1). Ao confirmar,
-// o sistema realiza em lote as compras do ciclo e cria o lançamento de pagamento (o
-// TransactionID antigo deixou de ser input — agora é gerado).
-type PayInvoiceInput struct {
+// AddInvoicePaymentInput é o payload para registrar UM pagamento de fatura (parcial ou
+// total, em fatura aberta/fechada/vencida). Cria o lançamento de caixa na data e, se o
+// pagamento quitar a fatura, realiza em lote as compras do ciclo.
+type AddInvoicePaymentInput struct {
 	CardID        string
 	Reference     string
+	Amount        int64 // valor do pagamento (centavos); ≤ saldo devedor
 	PaymentDate   string
 	SubcategoryID string  // subcategoria do lançamento de pagamento (default: transferência)
 	Title         string  // opcional; default "Pagamento de Fatura — <reference>"
@@ -85,12 +86,12 @@ type GetInvoiceUseCase interface {
 	Execute(ctx context.Context, cardID, reference string, p shared.Pagination) (InvoiceDetail, error)
 }
 
-type PayInvoiceUseCase interface {
-	Execute(ctx context.Context, in PayInvoiceInput) (Invoice, error)
+type AddInvoicePaymentUseCase interface {
+	Execute(ctx context.Context, in AddInvoicePaymentInput) (Invoice, error)
 }
 
 type UndoInvoicePaymentUseCase interface {
-	Execute(ctx context.Context, cardID, reference string) (Invoice, error)
+	Execute(ctx context.Context, cardID, reference, paymentID string) (Invoice, error)
 }
 
 type MonthlyCardSummaryUseCase interface {

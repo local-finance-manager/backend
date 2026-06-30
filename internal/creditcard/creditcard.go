@@ -116,7 +116,17 @@ var (
 	ErrInvoiceNotFound = domainerr.NewNotFound(
 		"fatura não encontrada", domainerr.WithDisplayable())
 	ErrInvoiceAlreadyPaid = domainerr.NewConflict(
-		"esta fatura já está marcada como paga", domainerr.WithDisplayable())
+		"esta fatura já está totalmente paga", domainerr.WithDisplayable())
+	// Pagamento parcial/antecipado: não dá para pagar fatura futura, nem valor inválido,
+	// nem mais do que o saldo devedor atual (sem crédito — decisão fechada).
+	ErrInvoiceFutura = domainerr.NewConflict(
+		"a fatura ainda não abriu", domainerr.WithDisplayable())
+	ErrInvalidPaymentAmount = domainerr.NewBadRequest(
+		"valor do pagamento inválido", domainerr.WithDisplayable())
+	ErrPaymentExceedsBalance = domainerr.NewConflict(
+		"o pagamento excede o saldo devedor da fatura", domainerr.WithDisplayable())
+	ErrPaymentNotFound = domainerr.NewNotFound(
+		"pagamento não encontrado", domainerr.WithDisplayable())
 )
 
 // ─── Helpers de calendário (privados, puros) ────────────────────────────────
@@ -229,8 +239,8 @@ func BestPurchaseDay(closingDay int) int {
 
 // DeriveInvoiceStatus deriva o status a partir de hoje, das datas do ciclo e do pagamento.
 // Comparação lexicográfica de strings YYYY-MM-DD (formato é zero-padded e ordenável).
-func DeriveInvoiceStatus(today, cycleStart, closingDate, dueDate string, hasPayment bool) InvoiceStatus {
-	if hasPayment {
+func DeriveInvoiceStatus(today, cycleStart, closingDate, dueDate string, fullyPaid bool) InvoiceStatus {
+	if fullyPaid {
 		return StatusPaga
 	}
 	switch {
