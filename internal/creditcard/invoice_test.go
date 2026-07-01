@@ -7,17 +7,26 @@ import (
 	"github.com/local-finance-manager/backend/internal/shared"
 )
 
+// mkTxn é uma compra EM ABERTO (pendente) — estado natural até a fatura ser paga.
 func mkTxn(id string, amount int64, competence, catID, catName, color string) shared.CardTransaction {
 	return shared.CardTransaction{
 		ID:             id,
 		Amount:         amount,
 		CompetenceDate: competence,
-		Status:         "realizado",
+		Status:         "pendente",
 		CategoryID:     catID,
 		CategoryName:   catName,
 		CategoryColor:  color,
 		CreditCardID:   "card-1",
 	}
+}
+
+// mkPaidTxn é uma compra já paga (realizado) numa data de pagamento.
+func mkPaidTxn(id string, amount int64, competence, payDate, catID, catName, color string) shared.CardTransaction {
+	t := mkTxn(id, amount, competence, catID, catName, color)
+	t.Status = "realizado"
+	t.PaymentDate = &payDate
+	return t
 }
 
 func card(closingDay, dueDay int) creditcard.CreditCard {
@@ -32,7 +41,7 @@ func TestBuildInvoice_TotalsAndBreakdown(t *testing.T) {
 		mkTxn("b", 90000, "2026-06-15", "cat-transp", "Transporte", "#2980B9"),
 		mkTxn("c", 10000, "2026-06-20", "cat-food", "Alimentação", "#27AE60"),
 	}
-	inv, err := creditcard.BuildInvoice("2026-07", txns, card(3, 10), "2026-06-25", nil)
+	inv, err := creditcard.BuildInvoice("2026-07", txns, card(3, 10), "2026-06-25")
 	if err != nil {
 		t.Fatalf("BuildInvoice: %v", err)
 	}
@@ -69,7 +78,7 @@ func TestBuildInvoice_IgnoresCancelled(t *testing.T) {
 			return c
 		}(),
 	}
-	inv, err := creditcard.BuildInvoice("2026-07", txns, card(3, 10), "2026-06-25", nil)
+	inv, err := creditcard.BuildInvoice("2026-07", txns, card(3, 10), "2026-06-25")
 	if err != nil {
 		t.Fatalf("BuildInvoice: %v", err)
 	}
@@ -82,7 +91,7 @@ func TestBuildInvoice_IgnoresCancelled(t *testing.T) {
 }
 
 func TestBuildInvoice_Empty(t *testing.T) {
-	inv, err := creditcard.BuildInvoice("2026-07", nil, card(3, 10), "2026-06-25", nil)
+	inv, err := creditcard.BuildInvoice("2026-07", nil, card(3, 10), "2026-06-25")
 	if err != nil {
 		t.Fatalf("BuildInvoice: %v", err)
 	}
@@ -95,11 +104,10 @@ func TestBuildInvoice_Empty(t *testing.T) {
 }
 
 func TestBuildInvoice_Paid(t *testing.T) {
-	// pagamento total (50000) → fatura quitada (StatusPaga, PaymentPaga, saldo 0).
-	pay := []creditcard.InvoicePayment{{ID: "p1", Reference: "2026-06", Amount: 50000, PaymentDate: "2026-06-10"}}
+	// compra paga (realizado, com data) → fatura quitada; pagamento derivado da compra.
 	inv, err := creditcard.BuildInvoice("2026-06", []shared.CardTransaction{
-		mkTxn("a", 50000, "2026-05-10", "cat-1", "Cat 1", "#fff"),
-	}, card(3, 10), "2026-08-01", pay)
+		mkPaidTxn("a", 50000, "2026-05-10", "2026-06-10", "cat-1", "Cat 1", "#fff"),
+	}, card(3, 10), "2026-08-01")
 	if err != nil {
 		t.Fatalf("BuildInvoice: %v", err)
 	}
@@ -109,14 +117,17 @@ func TestBuildInvoice_Paid(t *testing.T) {
 	if inv.PaidAmount != 50000 || inv.OutstandingAmount != 0 || len(inv.Payments) != 1 {
 		t.Errorf("pagamentos/saldo inesperados: %+v", inv)
 	}
+	if inv.Payments[0].PaymentDate != "2026-06-10" || inv.Payments[0].Amount != 50000 {
+		t.Errorf("pagamento derivado: %+v", inv.Payments)
+	}
 }
 
 func TestBuildInvoice_Partial(t *testing.T) {
-	// pagamento parcial (20000 de 50000) → parcial, saldo 30000, ciclo segue (não paga).
-	pay := []creditcard.InvoicePayment{{ID: "p1", Reference: "2026-06", Amount: 20000, PaymentDate: "2026-06-10"}}
+	// uma compra paga (20000) + uma em aberto (30000) → parcial, saldo 30000, não paga.
 	inv, err := creditcard.BuildInvoice("2026-06", []shared.CardTransaction{
-		mkTxn("a", 50000, "2026-05-10", "cat-1", "Cat 1", "#fff"),
-	}, card(3, 10), "2026-08-01", pay)
+		mkPaidTxn("a", 20000, "2026-05-10", "2026-06-10", "cat-1", "Cat 1", "#fff"),
+		mkTxn("b", 30000, "2026-05-12", "cat-1", "Cat 1", "#fff"),
+	}, card(3, 10), "2026-08-01")
 	if err != nil {
 		t.Fatalf("BuildInvoice: %v", err)
 	}
@@ -138,37 +149,23 @@ func TestUsedLimit(t *testing.T) {
 	// Fatura 2026-07 (fecha 03/07, vence 10/07) → vencida em 20/07 → conta
 	// Fatura 2026-08 (aberta: ciclo 04/07..03/08, today 20/07 dentro) → conta
 	// Fatura paga não conta.
+	// junho já PAGA (compra realizado); jul e ago em aberto.
 	txns := []shared.CardTransaction{
-		mkTxn("jun", 10000, "2026-05-20", "c", "C", "#f"), // ref 2026-06
-		mkTxn("jul", 20000, "2026-06-20", "c", "C", "#f"), // ref 2026-07
-		mkTxn("ago", 30000, "2026-07-20", "c", "C", "#f"), // ref 2026-08 (aberta)
+		mkPaidTxn("jun", 10000, "2026-05-20", "2026-06-10", "c", "C", "#f"), // ref 2026-06 (paga)
+		mkTxn("jul", 20000, "2026-06-20", "c", "C", "#f"),                   // ref 2026-07 (em aberto)
+		mkTxn("ago", 30000, "2026-07-20", "c", "C", "#f"),                   // ref 2026-08 (em aberto)
 	}
 	buckets, err := creditcardBuckets(txns, c.ClosingDay)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// sem pagamentos → tudo conta = 60000
-	used, err := creditcard.UsedLimit(buckets, c, today, map[string][]creditcard.InvoicePayment{})
-	if err != nil {
-		t.Fatalf("UsedLimit: %v", err)
-	}
-	if used != 60000 {
-		t.Errorf("used (sem pagamentos): got %d, want 60000", used)
-	}
-	// pagando a fatura de junho (total 10000) → 60000 - 10000 = 50000
-	payments := map[string][]creditcard.InvoicePayment{"2026-06": {{ID: "p1", Reference: "2026-06", Amount: 10000, PaymentDate: "2026-06-10"}}}
-	used, err = creditcard.UsedLimit(buckets, c, today, payments)
+	// só o que está em aberto compromete limite: jul + ago = 50000 (junho paga não conta).
+	used, err := creditcard.UsedLimit(buckets, c, today)
 	if err != nil {
 		t.Fatalf("UsedLimit: %v", err)
 	}
 	if used != 50000 {
-		t.Errorf("used (junho paga): got %d, want 50000", used)
-	}
-	// pagamento PARCIAL de julho (5000 de 20000) → libera 5000: 50000 - 5000 = 45000
-	payments["2026-07"] = []creditcard.InvoicePayment{{ID: "p2", Reference: "2026-07", Amount: 5000, PaymentDate: "2026-07-05"}}
-	used, _ = creditcard.UsedLimit(buckets, c, today, payments)
-	if used != 45000 {
-		t.Errorf("used (julho parcial 5000): got %d, want 45000", used)
+		t.Errorf("used: got %d, want 50000 (junho paga liberou)", used)
 	}
 }
 
@@ -183,7 +180,7 @@ func TestUsedLimit_FutureCounted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	used, err := creditcard.UsedLimit(buckets, c, "2026-06-01", map[string][]creditcard.InvoicePayment{})
+	used, err := creditcard.UsedLimit(buckets, c, "2026-06-01")
 	if err != nil {
 		t.Fatalf("UsedLimit: %v", err)
 	}
@@ -194,12 +191,10 @@ func TestUsedLimit_FutureCounted(t *testing.T) {
 
 func TestUsedLimit_PaidFutureNotCounted(t *testing.T) {
 	c := card(3, 10)
-	// fatura futura mas paga → não conta (paga nunca compromete)
-	txns := []shared.CardTransaction{mkTxn("a", 50000, "2026-12-20", "c", "C", "#f")}
+	// fatura futura mas paga (compra realizado) → não conta (paga nunca compromete).
+	txns := []shared.CardTransaction{mkPaidTxn("a", 50000, "2026-12-20", "2026-12-10", "c", "C", "#f")}
 	buckets, _ := creditcardBuckets(txns, c.ClosingDay)
-	ref, _ := creditcard.InvoiceReferenceFor("2026-12-20", c.ClosingDay)
-	payments := map[string][]creditcard.InvoicePayment{ref: {{ID: "p1", Reference: ref, Amount: 50000, PaymentDate: "2026-12-10"}}}
-	used, err := creditcard.UsedLimit(buckets, c, "2026-06-01", payments)
+	used, err := creditcard.UsedLimit(buckets, c, "2026-06-01")
 	if err != nil {
 		t.Fatalf("UsedLimit: %v", err)
 	}

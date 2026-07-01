@@ -2,7 +2,6 @@ package creditcard
 
 import (
 	"sort"
-	"time"
 
 	"github.com/local-finance-manager/backend/internal/shared"
 )
@@ -51,26 +50,59 @@ type CategoryBreakdown struct {
 	Percent      int
 }
 
-// InvoicePayment é uma entrada do ledger de pagamentos de uma fatura (1 por pagamento).
+// InvoicePayment é um "pagamento" da fatura: o lote de compras quitado numa mesma data.
+// NÃO há lançamento sintético — pagar uma fatura marca as próprias compras como pagas
+// (realizado) com payment_date; os pagamentos são derivados agrupando-as por data.
 type InvoicePayment struct {
-	ID            string
-	Reference     string
-	Amount        int64 // centavos
-	PaymentDate   string
-	TransactionID *string
-	CreatedAt     time.Time
+	PaymentDate string
+	Amount      int64 // soma das compras pagas nessa data
 }
 
-// sumPayments soma os valores dos pagamentos do ledger.
-func sumPayments(payments []InvoicePayment) int64 {
-	var paid int64
-	for _, p := range payments {
-		paid += p.Amount
+// paidAmount soma as compras já pagas (realizado) da fatura.
+func paidAmount(txns []shared.CardTransaction) int64 {
+	var v int64
+	for _, t := range txns {
+		if t.Status == statusRealizado {
+			v += t.Amount
+		}
 	}
-	return paid
+	return v
 }
 
-// derivePaymentStatus classifica o quanto da fatura foi pago.
+// outstandingAmount soma as compras em aberto (pendente) da fatura = saldo devedor.
+func outstandingAmount(txns []shared.CardTransaction) int64 {
+	var v int64
+	for _, t := range txns {
+		if t.Status == statusPendente {
+			v += t.Amount
+		}
+	}
+	return v
+}
+
+// derivePayments agrupa as compras pagas por data de pagamento (lotes), ordenado por data.
+func derivePayments(txns []shared.CardTransaction) []InvoicePayment {
+	byDate := map[string]int64{}
+	dates := []string{}
+	for _, t := range txns {
+		if t.Status != statusRealizado || t.PaymentDate == nil {
+			continue
+		}
+		d := *t.PaymentDate
+		if _, ok := byDate[d]; !ok {
+			dates = append(dates, d)
+		}
+		byDate[d] += t.Amount
+	}
+	sort.Strings(dates)
+	out := make([]InvoicePayment, 0, len(dates))
+	for _, d := range dates {
+		out = append(out, InvoicePayment{PaymentDate: d, Amount: byDate[d]})
+	}
+	return out
+}
+
+// derivePaymentStatus classifica o quanto da fatura já foi pago.
 func derivePaymentStatus(total, paid int64) PaymentStatus {
 	switch {
 	case total > 0 && paid >= total:
@@ -185,9 +217,10 @@ func bucketByReference(txns []shared.CardTransaction, closingDay int) (map[strin
 	return buckets, nil
 }
 
-// BuildInvoice monta a Invoice de uma reference, dado seu bucket, a config do cartão,
-// "hoje" e os pagamentos do ledger (0..N). txns pode ser vazio (fatura zerada).
-func BuildInvoice(reference string, txns []shared.CardTransaction, card CreditCard, today string, payments []InvoicePayment) (Invoice, error) {
+// BuildInvoice monta a Invoice de uma reference a partir das compras do ciclo (txns),
+// a config do cartão e "hoje". Os pagamentos são DERIVADOS das próprias compras pagas
+// (não há lançamento sintético). txns pode ser vazio (fatura zerada).
+func BuildInvoice(reference string, txns []shared.CardTransaction, card CreditCard, today string) (Invoice, error) {
 	cycleStart, err := CycleStart(reference, card.ClosingDay)
 	if err != nil {
 		return Invoice{}, err
@@ -202,15 +235,9 @@ func BuildInvoice(reference string, txns []shared.CardTransaction, card CreditCa
 	}
 
 	total := sumAmount(txns)
-	paid := sumPayments(payments)
-	outstanding := total - paid
-	if outstanding < 0 {
-		outstanding = 0
-	}
+	paid := paidAmount(txns)
+	outstanding := outstandingAmount(txns)
 	payStatus := derivePaymentStatus(total, paid)
-	if payments == nil {
-		payments = []InvoicePayment{}
-	}
 	return Invoice{
 		Reference:         reference,
 		CycleStart:        cycleStart,
@@ -222,15 +249,15 @@ func BuildInvoice(reference string, txns []shared.CardTransaction, card CreditCa
 		OutstandingAmount: outstanding,
 		PaymentStatus:     payStatus,
 		Count:             countCounted(txns),
-		Payments:          payments,
+		Payments:          derivePayments(txns),
 		CategoryBreakdown: breakdownByCategory(txns, total),
 	}, nil
 }
 
-// UsedLimit soma o SALDO DEVEDOR (total − pago) das faturas não quitadas (D11/RF-CC-07).
-// Pagamentos parciais liberam limite pelo valor pago; faturas pagas não comprometem nada.
-// Futura/aberta/fechada/vencida comprometem o saldo ainda devido (RF-PARC-10).
-func UsedLimit(buckets map[string][]shared.CardTransaction, card CreditCard, today string, paymentsByRef map[string][]InvoicePayment) (int64, error) {
+// UsedLimit soma o SALDO DEVEDOR (compras em aberto) das faturas não quitadas
+// (D11/RF-CC-07). Pagar compras libera o limite na hora; faturas pagas não comprometem
+// nada. Futura/aberta/fechada/vencida comprometem o que ainda está em aberto (RF-PARC-10).
+func UsedLimit(buckets map[string][]shared.CardTransaction, card CreditCard, today string) (int64, error) {
 	var used int64
 	for ref, txns := range buckets {
 		cycleStart, err := CycleStart(ref, card.ClosingDay)
@@ -246,14 +273,11 @@ func UsedLimit(buckets map[string][]shared.CardTransaction, card CreditCard, tod
 			return 0, err
 		}
 		total := sumAmount(txns)
-		paid := sumPayments(paymentsByRef[ref])
-		fullyPaid := total > 0 && paid >= total
+		outstanding := outstandingAmount(txns)
+		fullyPaid := total > 0 && outstanding == 0
 		switch DeriveInvoiceStatus(today, cycleStart, closingDate, dueDate, fullyPaid) {
 		case StatusAberta, StatusFechada, StatusVencida, StatusFutura:
-			outstanding := total - paid
-			if outstanding > 0 {
-				used += outstanding
-			}
+			used += outstanding
 		}
 	}
 	return used, nil

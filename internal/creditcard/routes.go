@@ -18,8 +18,8 @@ func Routes(h *Handler) func(chi.Router) {
 
 			r.Get("/invoices", h.ListInvoices)
 			r.Get("/invoices/{reference}", h.GetInvoice)
-			r.Post("/invoices/{reference}/payments", h.AddInvoicePayment)
-			r.Delete("/invoices/{reference}/payments/{paymentId}", h.UndoInvoicePayment)
+			r.Post("/invoices/{reference}/pay", h.PayInvoice)
+			r.Delete("/invoices/{reference}/payments/{paymentDate}", h.UndoInvoicePayment)
 		})
 	}
 }

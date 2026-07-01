@@ -35,7 +35,7 @@ type HandlerDeps struct {
 	Archive      ArchiveCreditCardUseCase
 	ListInvoices ListInvoicesUseCase
 	GetInvoice   GetInvoiceUseCase
-	AddPayment   AddInvoicePaymentUseCase
+	PayInvoice   PayInvoiceUseCase
 	UndoPayment  UndoInvoicePaymentUseCase
 	MonthSummary MonthlyCardSummaryUseCase
 }
@@ -83,12 +83,8 @@ type categoryBreakdownResp struct {
 }
 
 type paymentResp struct {
-	ID            string  `json:"id"`
-	Reference     string  `json:"reference"`
-	Amount        int64   `json:"amount"`
-	PaymentDate   string  `json:"payment_date"`
-	TransactionID *string `json:"transaction_id"`
-	CreatedAt     string  `json:"created_at"`
+	PaymentDate string `json:"payment_date"`
+	Amount      int64  `json:"amount"`
 }
 
 type invoiceResp struct {
@@ -155,11 +151,7 @@ type cardReq struct {
 }
 
 type payInvoiceReq struct {
-	Amount        int64   `json:"amount"`
-	PaymentDate   string  `json:"payment_date"`
-	SubcategoryID string  `json:"subcategory_id"`
-	Title         string  `json:"title"`
-	Description   *string `json:"description"`
+	PaymentDate string `json:"payment_date"`
 }
 
 // ─── Converters ─────────────────────────────────────────────────────────────
@@ -189,14 +181,7 @@ func toBreakdownResp(bs []CategoryBreakdown) []categoryBreakdownResp {
 func toInvoiceResp(inv Invoice) invoiceResp {
 	payments := make([]paymentResp, len(inv.Payments))
 	for i, p := range inv.Payments {
-		payments[i] = paymentResp{
-			ID:            p.ID,
-			Reference:     p.Reference,
-			Amount:        p.Amount,
-			PaymentDate:   p.PaymentDate,
-			TransactionID: p.TransactionID,
-			CreatedAt:     p.CreatedAt.UTC().Format(time.RFC3339),
-		}
+		payments[i] = paymentResp{PaymentDate: p.PaymentDate, Amount: p.Amount}
 	}
 	return invoiceResp{
 		Reference: inv.Reference, CycleStart: inv.CycleStart,
@@ -371,21 +356,17 @@ func (h *Handler) GetInvoice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// AddInvoicePayment trata POST /api/credit-cards/{id}/invoices/{reference}/payments
-func (h *Handler) AddInvoicePayment(w http.ResponseWriter, r *http.Request) {
+// PayInvoice trata POST /api/credit-cards/{id}/invoices/{reference}/pay
+func (h *Handler) PayInvoice(w http.ResponseWriter, r *http.Request) {
 	var req payInvoiceReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		domainerr.WriteError(w, domainerr.NewBadRequest("corpo da requisição inválido", domainerr.WithDisplayable()))
 		return
 	}
-	inv, err := h.deps.AddPayment.Execute(r.Context(), AddInvoicePaymentInput{
-		CardID:        chi.URLParam(r, "id"),
-		Reference:     chi.URLParam(r, "reference"),
-		Amount:        req.Amount,
-		PaymentDate:   req.PaymentDate,
-		SubcategoryID: req.SubcategoryID,
-		Title:         req.Title,
-		Description:   req.Description,
+	inv, err := h.deps.PayInvoice.Execute(r.Context(), PayInvoiceInput{
+		CardID:      chi.URLParam(r, "id"),
+		Reference:   chi.URLParam(r, "reference"),
+		PaymentDate: req.PaymentDate,
 	})
 	if err != nil {
 		domainerr.WriteError(w, err)
@@ -394,10 +375,10 @@ func (h *Handler) AddInvoicePayment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toInvoiceResp(inv))
 }
 
-// UndoInvoicePayment trata DELETE /api/credit-cards/{id}/invoices/{reference}/payments/{paymentId}
+// UndoInvoicePayment trata DELETE /api/credit-cards/{id}/invoices/{reference}/payments/{paymentDate}
 func (h *Handler) UndoInvoicePayment(w http.ResponseWriter, r *http.Request) {
 	inv, err := h.deps.UndoPayment.Execute(r.Context(),
-		chi.URLParam(r, "id"), chi.URLParam(r, "reference"), chi.URLParam(r, "paymentId"))
+		chi.URLParam(r, "id"), chi.URLParam(r, "reference"), chi.URLParam(r, "paymentDate"))
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return

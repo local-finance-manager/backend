@@ -594,9 +594,9 @@ func TestTransactionRepo_GetSummary_ExcludesCardPurchases(t *testing.T) {
 	// despesa normal (sem cartão) → conta no saldo
 	repo.Create(ctx, mkTransaction("normal", "Aluguel", "sub-exp", 100000,
 		transaction.TypeDespesa, transaction.MethodPix, transaction.StatusRealizado, "2026-01-01", strPtr("2026-01-01")))
-	// compra no cartão → NÃO conta no saldo (D14)
+	// compra no cartão EM ABERTO (pendente) → não conta no caixa até a fatura ser paga (D14)
 	card := mkTransaction("card", "Jantar fora", "sub-exp", 50000,
-		transaction.TypeDespesa, transaction.MethodCartaoCredito, transaction.StatusRealizado, "2026-01-02", strPtr("2026-01-02"))
+		transaction.TypeDespesa, transaction.MethodCartaoCredito, transaction.StatusPendente, "2026-01-02", nil)
 	cardID := "card-1"
 	card.CreditCardID = &cardID
 	repo.Create(ctx, card)
@@ -606,7 +606,7 @@ func TestTransactionRepo_GetSummary_ExcludesCardPurchases(t *testing.T) {
 		t.Fatalf("summary: %v", err)
 	}
 	if s.TotalDespesas != 100000 {
-		t.Errorf("TotalDespesas: got %d, want 100000 (compra de cartão deve ser excluída)", s.TotalDespesas)
+		t.Errorf("TotalDespesas: got %d, want 100000 (compra de cartão em aberto não conta no caixa)", s.TotalDespesas)
 	}
 	if s.CountTotal != 2 {
 		t.Errorf("CountTotal: got %d, want 2 (conta TODOS do filtro, incl. cartão — é o total da paginação)", s.CountTotal)
@@ -629,6 +629,33 @@ func TestTransactionRepo_GetSummary_ExcludesCardPurchases(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "card" {
 		t.Errorf("filtro credit_card_id: esperado só 'card', got %v", got)
+	}
+}
+
+// Opção 1 (regime de caixa): uma compra de cartão PAGA conta como despesa no mês da DATA
+// DE PAGAMENTO (não da competência) — é quando o dinheiro saiu para quitar a fatura.
+func TestTransactionRepo_GetSummary_PaidCardByPaymentDate(t *testing.T) {
+	db := newTestDB(t)
+	insertTestSub(t, db, "cat-exp", "Despesas", "despesa", "sub-exp", "Mercado")
+	repo := transaction.NewSQLiteRepository(db)
+	ctx := context.Background()
+
+	// compra de cartão competência jan, paga (realizado) em 01/jul.
+	card := mkTransaction("card", "Mercado", "sub-exp", 50000,
+		transaction.TypeDespesa, transaction.MethodCartaoCredito, transaction.StatusRealizado, "2026-01-10", strPtr("2026-07-01"))
+	cardID := "card-1"
+	card.CreditCardID = &cardID
+	repo.Create(ctx, card)
+
+	from, to := "2026-07-01", "2026-07-31"
+	sJul, _ := repo.GetSummary(ctx, transaction.TransactionFilter{CompetenceDateFrom: &from, CompetenceDateTo: &to})
+	if sJul.TotalDespesas != 50000 {
+		t.Errorf("julho (mês do pagamento) deveria contar a compra de cartão: got %d, want 50000", sJul.TotalDespesas)
+	}
+	jf, jt := "2026-01-01", "2026-01-31"
+	sJan, _ := repo.GetSummary(ctx, transaction.TransactionFilter{CompetenceDateFrom: &jf, CompetenceDateTo: &jt})
+	if sJan.TotalDespesas != 0 {
+		t.Errorf("janeiro (competência) NÃO deveria contar no caixa: got %d, want 0", sJan.TotalDespesas)
 	}
 }
 

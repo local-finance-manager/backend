@@ -66,7 +66,7 @@ Fluxo de uma fatura:
 1. O use case lê as compras do cartão via `CardTransactionReader.ListByCard`.
 2. `bucketByReference` agrupa por `reference` (YYYY-MM) usando `InvoiceReferenceFor`.
 3. `BuildInvoice` calcula datas do ciclo, total, count, status e breakdown.
-4. O pagamento (se houver) vem do `InvoicePaymentRepository` e define `StatusPaga`.
+4. Os pagamentos são derivados das compras pagas (por `payment_date`). `StatusPaga` ⇔ sem compra em aberto.
 
 ---
 
@@ -91,25 +91,38 @@ guia §3.3). A ponte é feita por interfaces + um DTO neutro em `shared`:
 
 ---
 
-## Decisão (E1): pagamento de fatura é atômico e escreve em `transactions`
+## Decisão: pagar fatura = marcar as COMPRAS como pagas (Opção 1, sem lançamento sintético)
 
-`PayInvoice` (`PATCH .../pay`) faz **três** escritas numa **única transação**
-(`InvoicePaymentRepository.PayInvoiceAtomic`, RF-PAGFAT-04):
+Pagar uma fatura **não cria lançamento nenhum** — apenas marca as compras EM ABERTO dela
+como `realizado` com a data informada. As próprias compras (com suas categorias) são as
+despesas; o "pagamento" é derivado agrupando as compras pagas por `payment_date`. Não há
+ledger nem lançamento "Pagamento de Fatura". Derivados na `Invoice`: `PaidAmount` (Σ
+realizado), `OutstandingAmount` (Σ pendente), `PaymentStatus` (`nenhum/parcial/paga`),
+`Payments` (`[{paymentDate, amount}]`). `StatusPaga` ⇔ não há compra em aberto e total > 0.
 
-1. **Baixa em lote** das compras pendentes do ciclo → `realizado` com `payment_date`.
-2. **Cria o lançamento de pagamento** (`realizado`, sem `credit_card_id`; tipo derivado da
-   subcategoria, default transferência → neutro ao fluxo, anti-dupla-contagem RF-PAGFAT-06).
-3. **Grava o registro** em `credit_card_invoice_payments` com o `transaction_id` criado.
+`PayInvoice` (`POST .../invoices/{ref}/pay`, body `{payment_date}`) marca **todas** as
+compras em aberto da fatura como pagas naquela data (`InvoicePaymentWriter.MarkInvoicePaid`).
+Sem valor — paga o saldo aberto do momento. Permitido em fatura **aberta/fechada/vencida**
+(não `futura`) e só com saldo > 0. **Pagar de novo** depois (com novas compras) quita só as
+que estiverem em aberto, gerando outro "lote" (outra data).
 
-`UndoInvoicePayment` (`DELETE .../pay`) reverte tudo numa transação (D2): compras
-`realizado → pendente` (limpa `payment_date`), exclui o lançamento de pagamento e remove o
-registro.
+`UndoInvoicePayment` (`DELETE .../invoices/{ref}/payments/{paymentDate}`) volta para
+`pendente` as compras pagas naquela data (`RevertInvoicePayment`).
 
-> **Exceção de posse de tabela (Opção A — igual ao `installment`):** estes dois métodos do
-> `InvoicePaymentRepository` escrevem na tabela `transactions` (posse do módulo `transaction`)
-> dentro da própria `tx`. É a única forma de obter atomicidade cross-module — ports em módulos
-> distintos rodariam em transações separadas. O `creditcard` continua **não importando** o
-> pacote `transaction`. `payment_method` do lançamento de pagamento é `"outros"` (DA3).
+`UsedLimit` = soma das compras **em aberto** (pendentes) das faturas não pagas; pagar libera
+o limite na hora.
+
+**Regime de caixa (D14, Opção 1):** uma compra de cartão entra no resumo de Lançamentos
+pela **data de pagamento** (data efetiva de caixa) quando paga, com a categoria real — não
+mais excluída. O Relatório por categoria continua acrual (compra na competência). Cada lente
+conta a compra uma vez (caixa = mês do pagamento; relatório = mês da compra).
+
+> **Exceção de posse de tabela (Opção A — igual ao `installment`):** o `InvoicePaymentWriter`
+> escreve em `transactions` (posse do módulo `transaction`) — só muda status/payment_date das
+> compras. O `creditcard` continua **não importando** o pacote `transaction`.
+>
+> **Histórico:** a migration 0011 (ledger) + 0012 (pagamento como despesa) foram superadas
+> pela 0013, que dropa o ledger e remove os lançamentos sintéticos antigos.
 
 ---
 
@@ -122,7 +135,7 @@ registro.
 | `CycleStart(ref, closingDay)` | dia seguinte ao fechamento anterior |
 | `InvoiceReferenceFor(purchaseDate, closingDay)` | reference (YYYY-MM) a que a compra pertence |
 | `BestPurchaseDay(closingDay)` | melhor dia de compra (cosmético) |
-| `DeriveInvoiceStatus(...)` | `futura/aberta/fechada/vencida` (ou `paga` se houver pagamento) |
+| `DeriveInvoiceStatus(...)` | `futura/aberta/fechada/vencida` (ou `paga` quando `pago ≥ total`) |
 
 > Comparações de data usam **strings `YYYY-MM-DD` lexicograficamente** (formato
 > zero-padded e ordenável) — sem aritmética de fuso. `clampDay` resolve dias
@@ -162,7 +175,7 @@ os três ports: `CreditCardRepository`, `InvoicePaymentRepository` e
 ```go
 type HandlerDeps struct {
     Create, Get, List, Update, Delete, Archive,
-    ListInvoices, GetInvoice, PayInvoice, UndoPayment, MonthSummary // (use cases)
+    ListInvoices, GetInvoice, AddPayment, UndoPayment, MonthSummary // (use cases)
 }
 ```
 
@@ -211,8 +224,8 @@ type HandlerDeps struct {
 | GET    | /api/credit-cards/{id}/summary                           | CardSummary         |
 | GET    | /api/credit-cards/{id}/invoices                          | ListInvoices        |
 | GET    | /api/credit-cards/{id}/invoices/{reference}              | GetInvoice          |
-| PATCH  | /api/credit-cards/{id}/invoices/{reference}/pay          | PayInvoice          |
-| DELETE | /api/credit-cards/{id}/invoices/{reference}/pay          | UndoInvoicePayment  |
+| POST   | /api/credit-cards/{id}/invoices/{reference}/pay                     | PayInvoice          |
+| DELETE | /api/credit-cards/{id}/invoices/{reference}/payments/{paymentDate}  | UndoInvoicePayment  |
 
 > `{reference}` é `YYYY-MM`. Excluir um cartão com lançamentos é bloqueado
 > (`ErrCardHasTransactions`) — o caminho esperado é **arquivar**.

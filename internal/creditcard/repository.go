@@ -2,7 +2,6 @@ package creditcard
 
 import (
 	"context"
-	"time"
 
 	"github.com/local-finance-manager/backend/internal/shared"
 )
@@ -19,59 +18,16 @@ type CreditCardRepository interface {
 	SetArchived(ctx context.Context, id string, archived bool) error
 }
 
-// InvoicePaymentRepository persiste o LEDGER de pagamentos de fatura (única parte da
-// fatura armazenada — D4). Cada fatura tem 0..N pagamentos (parcial/antecipado).
-type InvoicePaymentRepository interface {
-	// ListByCard devolve os pagamentos do cartão agrupados por reference de fatura.
-	ListByCard(ctx context.Context, cardID string) (map[string][]InvoicePayment, error)
-	// AddPaymentAtomic registra um pagamento numa única transação: insere a entrada no
-	// ledger, cria o lançamento de caixa (Payment) e, SE o pagamento quitou a fatura,
-	// realiza em lote as compras do ciclo (RealizeIDs → realizado, payment_date).
-	// Escreve em transactions — exceção de posse de tabela documentada (Opção A).
-	AddPaymentAtomic(ctx context.Context, in AtomicAddPaymentInput) error
-	// RemovePaymentAtomic desfaz um pagamento numa transação: exclui a entrada do ledger
-	// (por id) e o lançamento de caixa, e — SE a fatura deixou de estar quitada — reverte
-	// as compras do ciclo (RevertIDs → pendente). ErrPaymentNotFound se o id não existir.
-	RemovePaymentAtomic(ctx context.Context, in AtomicRemovePaymentInput) error
-}
-
-// PaymentTxn descreve o lançamento de pagamento de fatura a ser criado (E1). Nasce
-// `realizado`, sem credit_card_id; o Type é derivado da subcategoria escolhida (default
-// transferência → neutro ao fluxo, anti-dupla-contagem RF-PAGFAT-06).
-type PaymentTxn struct {
-	ID             string
-	Title          string
-	Description    *string
-	Amount         int64
-	Type           string // despesa|receita|transferencia (derivado da subcategoria)
-	SubcategoryID  string
-	PaymentMethod  string // "outros" (DA3)
-	CompetenceDate string // = PaymentDate
-	PaymentDate    string
-	CreatedAt      time.Time
-}
-
-// AtomicAddPaymentInput é o payload de AddPaymentAtomic.
-type AtomicAddPaymentInput struct {
-	CardID     string
-	Entry      InvoicePayment // entrada do ledger (id, reference, amount, payment_date, transaction_id)
-	Payment    PaymentTxn     // lançamento de caixa a criar (id == Entry.TransactionID)
-	RealizeIDs []string       // compras pendentes a realizar (só quando o pagamento quita a fatura)
-	RealizeAt  string         // payment_date aplicada às compras realizadas
-}
-
-// AtomicRemovePaymentInput é o payload de RemovePaymentAtomic.
-type AtomicRemovePaymentInput struct {
-	PaymentID    string   // id da entrada do ledger a excluir
-	PaymentTxnID string   // lançamento de caixa a excluir
-	RevertIDs    []string // compras a voltar para pendente (só quando deixa de estar quitada)
-}
-
-// SubcategoryReader fornece o tipo de uma subcategoria (despesa/receita/transferencia),
-// usado para derivar o Type do lançamento de pagamento (E1). Implementado por
-// category.SubcategoryFacade e injetado no main.go (guia §3.3).
-type SubcategoryReader interface {
-	GetSubcategoryType(ctx context.Context, subcategoryID string) (string, error)
+// InvoicePaymentWriter marca/reverte as COMPRAS da fatura como pagas (não há lançamento
+// sintético — Opção 1). Pagar uma fatura = marcar suas compras em aberto como `realizado`
+// com a data de pagamento; desfazer = voltar para `pendente`. Escreve na tabela
+// `transactions` (posse do módulo transaction) — exceção consciente de posse (Opção A,
+// igual ao installment), pois a operação é só de status/data.
+type InvoicePaymentWriter interface {
+	// MarkInvoicePaid marca as compras (ids) como realizado com a data informada.
+	MarkInvoicePaid(ctx context.Context, ids []string, paymentDate string) error
+	// RevertInvoicePayment volta as compras (ids) para pendente, limpando a data.
+	RevertInvoicePayment(ctx context.Context, ids []string) error
 }
 
 // CardTransactionReader é o port pelo qual o creditcard lê lançamentos de cartão.

@@ -21,7 +21,7 @@ var (
 	_ ArchiveCreditCardUseCase  = (*archiveCreditCardImpl)(nil)
 	_ ListInvoicesUseCase       = (*listInvoicesImpl)(nil)
 	_ GetInvoiceUseCase         = (*getInvoiceImpl)(nil)
-	_ AddInvoicePaymentUseCase  = (*addInvoicePaymentImpl)(nil)
+	_ PayInvoiceUseCase         = (*payInvoiceImpl)(nil)
 	_ UndoInvoicePaymentUseCase = (*undoInvoicePaymentImpl)(nil)
 	_ MonthlyCardSummaryUseCase = (*monthlyCardSummaryImpl)(nil)
 )
@@ -104,68 +104,24 @@ func (f *fakeCardRepo) SetArchived(_ context.Context, id string, archived bool) 
 	return nil
 }
 
-type fakePayRepo struct {
-	data    map[string]map[string][]InvoicePayment // cardID → reference → ledger
-	lastAdd *AtomicAddPaymentInput
-	lastRem *AtomicRemovePaymentInput
+// fakeWriter satisfaz InvoicePaymentWriter: marca/reverte as compras (mutando o fakeReader,
+// para refletir o estado em passos seguintes) e registra a última chamada.
+type fakeWriter struct {
+	reader        *fakeReader
+	lastMarkIDs   []string
+	lastMarkDate  string
+	lastRevertIDs []string
 }
 
-func newFakePayRepo() *fakePayRepo {
-	return &fakePayRepo{data: map[string]map[string][]InvoicePayment{}}
-}
-
-// seed adiciona um pagamento ao ledger (helper de teste).
-func (f *fakePayRepo) seed(cardID string, p InvoicePayment) {
-	if f.data[cardID] == nil {
-		f.data[cardID] = map[string][]InvoicePayment{}
-	}
-	f.data[cardID][p.Reference] = append(f.data[cardID][p.Reference], p)
-}
-
-func (f *fakePayRepo) ListByCard(_ context.Context, cardID string) (map[string][]InvoicePayment, error) {
-	out := map[string][]InvoicePayment{}
-	for ref, ps := range f.data[cardID] {
-		out[ref] = append([]InvoicePayment{}, ps...)
-	}
-	return out, nil
-}
-func (f *fakePayRepo) AddPaymentAtomic(_ context.Context, in AtomicAddPaymentInput) error {
-	cp := in
-	f.lastAdd = &cp
-	f.seed(in.CardID, in.Entry)
+func (w *fakeWriter) MarkInvoicePaid(_ context.Context, ids []string, paymentDate string) error {
+	w.lastMarkIDs, w.lastMarkDate = ids, paymentDate
+	w.reader.setStatus(ids, statusRealizado, &paymentDate)
 	return nil
 }
-func (f *fakePayRepo) RemovePaymentAtomic(_ context.Context, in AtomicRemovePaymentInput) error {
-	cp := in
-	f.lastRem = &cp
-	for card, byRef := range f.data {
-		for ref, ps := range byRef {
-			kept := make([]InvoicePayment, 0, len(ps))
-			found := false
-			for _, p := range ps {
-				if p.ID == in.PaymentID {
-					found = true
-					continue
-				}
-				kept = append(kept, p)
-			}
-			if found {
-				f.data[card][ref] = kept
-				return nil
-			}
-		}
-	}
-	return ErrPaymentNotFound
-}
-
-// fakeSubReader satisfaz SubcategoryReader (deriva o tipo do lançamento de pagamento).
-type fakeSubReader struct {
-	typ string
-	err error
-}
-
-func (f fakeSubReader) GetSubcategoryType(_ context.Context, _ string) (string, error) {
-	return f.typ, f.err
+func (w *fakeWriter) RevertInvoicePayment(_ context.Context, ids []string) error {
+	w.lastRevertIDs = ids
+	w.reader.setStatus(ids, statusPendente, nil)
+	return nil
 }
 
 type fakeReader struct {
@@ -187,6 +143,22 @@ func (f *fakeReader) HasTransactions(_ context.Context, cardID string) (bool, er
 	return len(f.txns[cardID]) > 0, nil
 }
 
+// setStatus muta as compras (por id) — usado pelo fakeWriter para refletir pagar/desfazer.
+func (f *fakeReader) setStatus(ids []string, status string, payDate *string) {
+	set := map[string]struct{}{}
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	for card := range f.txns {
+		for i := range f.txns[card] {
+			if _, ok := set[f.txns[card][i].ID]; ok {
+				f.txns[card][i].Status = status
+				f.txns[card][i].PaymentDate = payDate
+			}
+		}
+	}
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 func seedCard(repo *fakeCardRepo, id string, archived bool) {
@@ -196,16 +168,23 @@ func seedCard(repo *fakeCardRepo, id string, archived bool) {
 	}
 }
 
+// cardTxn é uma compra de cartão EM ABERTO (pendente) — estado natural até a fatura ser paga.
 func cardTxn(id, competence string, amount int64) shared.CardTransaction {
 	return shared.CardTransaction{
-		ID: id, Amount: amount, CompetenceDate: competence, Status: "realizado",
+		ID: id, Amount: amount, CompetenceDate: competence, Status: statusPendente,
 		CategoryID: "cat-1", CategoryName: "Cat 1", CategoryColor: "#fff", CreditCardID: "card-1",
 	}
 }
 
 func pendingTxn(id, competence string, amount int64) shared.CardTransaction {
+	return cardTxn(id, competence, amount)
+}
+
+// paidTxn é uma compra já paga (realizado) numa data de pagamento.
+func paidTxn(id, competence string, amount int64, payDate string) shared.CardTransaction {
 	t := cardTxn(id, competence, amount)
-	t.Status = "pendente"
+	t.Status = statusRealizado
+	t.PaymentDate = &payDate
 	return t
 }
 
@@ -262,7 +241,7 @@ func TestGet_BuildsIndicators(t *testing.T) {
 	// compra em 2026-07-20 cai na fatura aberta (ref 2026-08, ciclo 04/07..03/08)
 	reader.txns["card-1"] = []shared.CardTransaction{cardTxn("t1", "2026-07-20", 132000)}
 
-	uc := &getCreditCardImpl{repo: repo, payRepo: newFakePayRepo(), reader: reader, now: fixedNow}
+	uc := &getCreditCardImpl{repo: repo, reader: reader, now: fixedNow}
 	d, err := uc.Execute(context.Background(), "card-1")
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -290,7 +269,7 @@ func TestGet_BuildsIndicators(t *testing.T) {
 func TestGet_EmptyCardHasZeroedOpenInvoice(t *testing.T) {
 	repo := newFakeCardRepo()
 	seedCard(repo, "card-1", false)
-	uc := &getCreditCardImpl{repo: repo, payRepo: newFakePayRepo(), reader: newFakeReader(), now: fixedNow}
+	uc := &getCreditCardImpl{repo: repo, reader: newFakeReader(), now: fixedNow}
 	d, err := uc.Execute(context.Background(), "card-1")
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -304,7 +283,7 @@ func TestGet_EmptyCardHasZeroedOpenInvoice(t *testing.T) {
 }
 
 func TestGet_NotFound(t *testing.T) {
-	uc := &getCreditCardImpl{repo: newFakeCardRepo(), payRepo: newFakePayRepo(), reader: newFakeReader(), now: fixedNow}
+	uc := &getCreditCardImpl{repo: newFakeCardRepo(), reader: newFakeReader(), now: fixedNow}
 	if _, err := uc.Execute(context.Background(), "ghost"); err == nil {
 		t.Error("expected not-found")
 	}
@@ -317,7 +296,7 @@ func TestList_ReturnsDetails(t *testing.T) {
 	seedCard(repo, "card-1", false)
 	seedCard(repo, "card-2", false)
 	seedCard(repo, "card-3", true)
-	uc := &listCreditCardsImpl{repo: repo, payRepo: newFakePayRepo(), reader: newFakeReader(), now: fixedNow}
+	uc := &listCreditCardsImpl{repo: repo, reader: newFakeReader(), now: fixedNow}
 
 	res, err := uc.Execute(context.Background(), ListInput{
 		Archived:   false,
@@ -435,23 +414,23 @@ func TestArchive_NotFound(t *testing.T) {
 
 // ─── Invoices ───────────────────────────────────────────────────────────────
 
-func payDeps(t *testing.T) (*fakeCardRepo, *fakePayRepo, *fakeReader) {
+func payDeps(t *testing.T) (*fakeCardRepo, *fakeReader) {
 	t.Helper()
 	repo := newFakeCardRepo()
 	seedCard(repo, "card-1", false)
 	reader := newFakeReader()
-	// compra em 2026-06-20 → ref 2026-07 (closing 03/07, due 10/07) → vencida em 20/07
-	// compra em 2026-07-20 → ref 2026-08 (aberta)
+	// compra em 2026-06-20 → ref 2026-07 (closing 03/07, due 10/07) → vencida em 20/07 (em aberto)
+	// compra em 2026-07-20 → ref 2026-08 (aberta, em aberto)
 	reader.txns["card-1"] = []shared.CardTransaction{
 		cardTxn("past", "2026-06-20", 20000),
 		cardTxn("open", "2026-07-20", 30000),
 	}
-	return repo, newFakePayRepo(), reader
+	return repo, reader
 }
 
 func TestListInvoices(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &listInvoicesImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
+	repo, reader := payDeps(t)
+	uc := &listInvoicesImpl{repo: repo, reader: reader, now: fixedNow}
 	invs, err := uc.Execute(context.Background(), "card-1")
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -466,8 +445,8 @@ func TestListInvoices(t *testing.T) {
 }
 
 func TestGetInvoice_FoundAndPaginated(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &getInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
+	repo, reader := payDeps(t)
+	uc := &getInvoiceImpl{repo: repo, reader: reader, now: fixedNow}
 	det, err := uc.Execute(context.Background(), "card-1", "2026-07", shared.Pagination{Page: 1, Limit: 10})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -481,160 +460,125 @@ func TestGetInvoice_FoundAndPaginated(t *testing.T) {
 }
 
 func TestGetInvoice_NotFound(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &getInvoiceImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
+	repo, reader := payDeps(t)
+	uc := &getInvoiceImpl{repo: repo, reader: reader, now: fixedNow}
 	if _, err := uc.Execute(context.Background(), "card-1", "2099-01", shared.Pagination{Page: 1, Limit: 10}); err != ErrInvoiceNotFound {
 		t.Errorf("expected ErrInvoiceNotFound, got %v", err)
 	}
 }
 
-func TestAddInvoicePayment_FullPayment(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	// "past" (ref 2026-07) começa pendente → deve ser realizada ao quitar.
+func TestPayInvoice_FullOpenBalance(t *testing.T) {
+	repo, reader := payDeps(t)
 	reader.txns["card-1"] = []shared.CardTransaction{
 		pendingTxn("past", "2026-06-20", 20000),
 		cardTxn("open", "2026-07-20", 30000),
 	}
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	inv, err := uc.Execute(context.Background(), AddInvoicePaymentInput{
-		CardID: "card-1", Reference: "2026-07", Amount: 20000, PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto",
-	})
+	writer := &fakeWriter{reader: reader}
+	uc := &payInvoiceImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	inv, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15"})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if inv.Status != StatusPaga || inv.PaymentStatus != PaymentPaga || inv.OutstandingAmount != 0 {
 		t.Errorf("fatura deveria ficar paga: %+v", inv)
 	}
-	if len(pay.data["card-1"]["2026-07"]) != 1 {
-		t.Fatalf("pagamento não persistido no ledger")
+	// só a compra em aberto da fatura 2026-07 foi marcada (não a "open" de 2026-08).
+	if len(writer.lastMarkIDs) != 1 || writer.lastMarkIDs[0] != "past" || writer.lastMarkDate != "2026-07-15" {
+		t.Errorf("marcação inesperada: ids=%v date=%s", writer.lastMarkIDs, writer.lastMarkDate)
 	}
-	// quitou → baixa em lote da compra pendente.
-	if pay.lastAdd == nil || len(pay.lastAdd.RealizeIDs) != 1 || pay.lastAdd.RealizeIDs[0] != "past" {
-		t.Errorf("RealizeIDs inesperados: %+v", pay.lastAdd)
-	}
-	p := pay.lastAdd.Payment
-	if p.Type != "transferencia" || p.Amount != 20000 || p.PaymentMethod != "outros" {
-		t.Errorf("payment txn inesperado: %+v", p)
+	if len(inv.Payments) != 1 || inv.Payments[0].PaymentDate != "2026-07-15" || inv.Payments[0].Amount != 20000 {
+		t.Errorf("pagamentos derivados: %+v", inv.Payments)
 	}
 }
 
-func TestAddInvoicePayment_Partial(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	reader.txns["card-1"] = []shared.CardTransaction{pendingTxn("past", "2026-06-20", 20000)}
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	inv, err := uc.Execute(context.Background(), AddInvoicePaymentInput{
-		CardID: "card-1", Reference: "2026-07", Amount: 8000, PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto",
-	})
+func TestPayInvoice_PaysOnlyOpenBatches(t *testing.T) {
+	repo, reader := payDeps(t)
+	// fatura 2026-07: uma compra já paga (07-10) + uma nova em aberto.
+	reader.txns["card-1"] = []shared.CardTransaction{
+		paidTxn("a", "2026-06-18", 10000, "2026-07-10"),
+		pendingTxn("b", "2026-06-25", 5000),
+	}
+	writer := &fakeWriter{reader: reader}
+	uc := &payInvoiceImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	inv, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-18"})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if inv.PaymentStatus != PaymentParcial || inv.PaidAmount != 8000 || inv.OutstandingAmount != 12000 || inv.Status == StatusPaga {
-		t.Errorf("parcial inesperado: %+v", inv)
+	if len(writer.lastMarkIDs) != 1 || writer.lastMarkIDs[0] != "b" {
+		t.Errorf("deveria pagar só as em aberto: %v", writer.lastMarkIDs)
 	}
-	// parcial não quita → sem baixa em lote.
-	if pay.lastAdd == nil || len(pay.lastAdd.RealizeIDs) != 0 {
-		t.Errorf("parcial não deveria realizar compras: %+v", pay.lastAdd)
+	if len(inv.Payments) != 2 || inv.PaymentStatus != PaymentPaga {
+		t.Errorf("esperava 2 lotes e fatura paga: %+v", inv)
 	}
 }
 
-func TestAddInvoicePayment_OpenInvoiceAllowed(t *testing.T) {
-	repo, pay, reader := payDeps(t) // ref 2026-08 aberta (compra "open" 30000)
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	inv, err := uc.Execute(context.Background(), AddInvoicePaymentInput{
-		CardID: "card-1", Reference: "2026-08", Amount: 10000, PaymentDate: "2026-07-20", SubcategoryID: "sub-trf-pgto",
-	})
+func TestPayInvoice_OpenInvoiceAllowed(t *testing.T) {
+	repo, reader := payDeps(t) // 2026-08 aberta, compra "open" em aberto
+	writer := &fakeWriter{reader: reader}
+	uc := &payInvoiceImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	inv, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-08", PaymentDate: "2026-07-20"})
 	if err != nil {
 		t.Fatalf("pagar fatura aberta deveria ser permitido (antecipamento): %v", err)
 	}
-	if inv.PaymentStatus != PaymentParcial || inv.PaidAmount != 10000 {
-		t.Errorf("antecipado parcial em fatura aberta: %+v", inv)
+	if inv.PaymentStatus != PaymentPaga || len(writer.lastMarkIDs) != 1 || writer.lastMarkIDs[0] != "open" {
+		t.Errorf("antecipado em fatura aberta: %+v ids=%v", inv, writer.lastMarkIDs)
 	}
 }
 
-func TestAddInvoicePayment_ExceedsBalance(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	_, err := uc.Execute(context.Background(), AddInvoicePaymentInput{CardID: "card-1", Reference: "2026-07", Amount: 25000, PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto"})
-	if err != ErrPaymentExceedsBalance {
-		t.Errorf("expected ErrPaymentExceedsBalance, got %v", err)
-	}
-}
-
-func TestAddInvoicePayment_AlreadyPaid(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	pay.seed("card-1", InvoicePayment{ID: "p1", Reference: "2026-07", Amount: 20000, PaymentDate: "2026-07-10"})
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	_, err := uc.Execute(context.Background(), AddInvoicePaymentInput{CardID: "card-1", Reference: "2026-07", Amount: 1000, PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto"})
-	if err != ErrInvoiceAlreadyPaid {
+func TestPayInvoice_AlreadyPaid(t *testing.T) {
+	repo, reader := payDeps(t)
+	reader.txns["card-1"] = []shared.CardTransaction{paidTxn("a", "2026-06-20", 20000, "2026-07-10")}
+	writer := &fakeWriter{reader: reader}
+	uc := &payInvoiceImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	if _, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "2026-07-15"}); err != ErrInvoiceAlreadyPaid {
 		t.Errorf("expected ErrInvoiceAlreadyPaid, got %v", err)
 	}
 }
 
-func TestAddInvoicePayment_InvalidAmountAndDateAndSubcat(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	if _, err := uc.Execute(context.Background(), AddInvoicePaymentInput{CardID: "card-1", Reference: "2026-07", Amount: 0, PaymentDate: "2026-07-15", SubcategoryID: "s"}); err != ErrInvalidPaymentAmount {
-		t.Errorf("valor 0 → ErrInvalidPaymentAmount, got %v", err)
-	}
-	if _, err := uc.Execute(context.Background(), AddInvoicePaymentInput{CardID: "card-1", Reference: "2026-07", Amount: 100, PaymentDate: "15/07/2026", SubcategoryID: "s"}); err == nil {
-		t.Error("data inválida deveria falhar")
-	}
-	if _, err := uc.Execute(context.Background(), AddInvoicePaymentInput{CardID: "card-1", Reference: "2026-07", Amount: 100, PaymentDate: "2026-07-15"}); err == nil {
-		t.Error("subcategoria ausente deveria falhar")
+func TestPayInvoice_Futura(t *testing.T) {
+	repo, reader := payDeps(t)
+	reader.txns["card-1"] = []shared.CardTransaction{pendingTxn("fut", "2027-01-15", 9000)} // ref 2027-02 (futura)
+	writer := &fakeWriter{reader: reader}
+	uc := &payInvoiceImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	if _, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2027-02", PaymentDate: "2026-07-15"}); err != ErrInvoiceFutura {
+		t.Errorf("expected ErrInvoiceFutura, got %v", err)
 	}
 }
 
-func TestAddInvoicePayment_NotFound(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &addInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, subs: fakeSubReader{typ: "transferencia"}, now: fixedNow}
-	_, err := uc.Execute(context.Background(), AddInvoicePaymentInput{CardID: "card-1", Reference: "2099-01", Amount: 100, PaymentDate: "2026-07-15", SubcategoryID: "sub-trf-pgto"})
-	if err != ErrInvoiceNotFound {
+func TestPayInvoice_InvalidDateAndNotFound(t *testing.T) {
+	repo, reader := payDeps(t)
+	writer := &fakeWriter{reader: reader}
+	uc := &payInvoiceImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	if _, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2026-07", PaymentDate: "15/07/2026"}); err == nil {
+		t.Error("data inválida deveria falhar")
+	}
+	if _, err := uc.Execute(context.Background(), PayInvoiceInput{CardID: "card-1", Reference: "2099-01", PaymentDate: "2026-07-15"}); err != ErrInvoiceNotFound {
 		t.Errorf("expected ErrInvoiceNotFound, got %v", err)
 	}
 }
 
 func TestUndoInvoicePayment_Success(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	reader.txns["card-1"] = []shared.CardTransaction{cardTxn("past", "2026-06-20", 20000)} // realizado (quitada)
-	pay.seed("card-1", InvoicePayment{ID: "p1", Reference: "2026-07", Amount: 20000, PaymentDate: "2026-07-10", TransactionID: strPtrCC("pay-txn-1")})
-	uc := &undoInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	inv, err := uc.Execute(context.Background(), "card-1", "2026-07", "p1")
+	repo, reader := payDeps(t)
+	reader.txns["card-1"] = []shared.CardTransaction{paidTxn("past", "2026-06-20", 20000, "2026-07-10")}
+	writer := &fakeWriter{reader: reader}
+	uc := &undoInvoicePaymentImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	inv, err := uc.Execute(context.Background(), "card-1", "2026-07", "2026-07-10")
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if inv.PaymentStatus == PaymentPaga {
-		t.Error("não deveria continuar paga após desfazer")
+	if len(writer.lastRevertIDs) != 1 || writer.lastRevertIDs[0] != "past" {
+		t.Errorf("revert ids: %v", writer.lastRevertIDs)
 	}
-	if len(pay.data["card-1"]["2026-07"]) != 0 {
-		t.Error("pagamento deveria ter sido removido")
-	}
-	if pay.lastRem == nil || pay.lastRem.PaymentTxnID != "pay-txn-1" {
-		t.Errorf("undo não passou o PaymentTxnID: %+v", pay.lastRem)
-	}
-	// estava quitada e deixou de estar → reverte a compra realizada.
-	if len(pay.lastRem.RevertIDs) != 1 || pay.lastRem.RevertIDs[0] != "past" {
-		t.Errorf("RevertIDs inesperados: %+v", pay.lastRem)
-	}
-}
-
-func TestUndoInvoicePayment_PartialNoRevert(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	reader.txns["card-1"] = []shared.CardTransaction{pendingTxn("past", "2026-06-20", 20000)}
-	pay.seed("card-1", InvoicePayment{ID: "p1", Reference: "2026-07", Amount: 8000, PaymentDate: "2026-07-10", TransactionID: strPtrCC("pay-txn-1")})
-	uc := &undoInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	if _, err := uc.Execute(context.Background(), "card-1", "2026-07", "p1"); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	// não estava quitada → não reabre compras.
-	if pay.lastRem == nil || len(pay.lastRem.RevertIDs) != 0 {
-		t.Errorf("parcial não deveria reverter compras: %+v", pay.lastRem)
+	if inv.PaymentStatus == PaymentPaga || inv.OutstandingAmount != 20000 {
+		t.Errorf("após desfazer deveria reabrir: %+v", inv)
 	}
 }
 
 func TestUndoInvoicePayment_NotFound(t *testing.T) {
-	repo, pay, reader := payDeps(t)
-	uc := &undoInvoicePaymentImpl{repo: repo, payRepo: pay, reader: reader, now: fixedNow}
-	if _, err := uc.Execute(context.Background(), "card-1", "2026-07", "nope"); err != ErrPaymentNotFound {
+	repo, reader := payDeps(t) // compras em aberto, sem pagamento na data
+	writer := &fakeWriter{reader: reader}
+	uc := &undoInvoicePaymentImpl{repo: repo, reader: reader, writer: writer, now: fixedNow}
+	if _, err := uc.Execute(context.Background(), "card-1", "2026-07", "2026-07-10"); err != ErrPaymentNotFound {
 		t.Errorf("expected ErrPaymentNotFound, got %v", err)
 	}
 }

@@ -17,47 +17,59 @@ import (
 
 // ─── Fakes mínimos dos ports cross-module ───────────────────────────────────
 
-type ccFakeReader struct{ txns []shared.CardTransaction }
+// ccFakeReader lê as compras do cartão direto do DB de teste (reflete pagar/desfazer, que
+// alteram status/payment_date das compras).
+type ccFakeReader struct{ db *sql.DB }
 
-func (f ccFakeReader) ListByCard(_ context.Context, cardID, from, to string) ([]shared.CardTransaction, error) {
+func (f ccFakeReader) ListByCard(ctx context.Context, cardID, from, to string) ([]shared.CardTransaction, error) {
+	rows, err := f.db.QueryContext(ctx,
+		`SELECT id, COALESCE(title,''), amount, competence_date, payment_date, status, COALESCE(subcategory_id,'')
+		 FROM transactions WHERE credit_card_id = ? AND competence_date >= ? AND competence_date <= ?`,
+		cardID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	out := []shared.CardTransaction{}
-	for _, t := range f.txns {
-		if t.CreditCardID == cardID && t.CompetenceDate >= from && t.CompetenceDate <= to {
-			out = append(out, t)
+	for rows.Next() {
+		var t shared.CardTransaction
+		var pd sql.NullString
+		if err := rows.Scan(&t.ID, &t.Title, &t.Amount, &t.CompetenceDate, &pd, &t.Status, &t.SubcategoryID); err != nil {
+			return nil, err
 		}
+		if pd.Valid {
+			d := pd.String
+			t.PaymentDate = &d
+		}
+		t.CreditCardID = cardID
+		t.CategoryID, t.CategoryName, t.CategoryColor = "cat", "Cat", "#fff"
+		out = append(out, t)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
-func (f ccFakeReader) HasTransactions(_ context.Context, cardID string) (bool, error) {
-	for _, t := range f.txns {
-		if t.CreditCardID == cardID {
-			return true, nil
-		}
+func (f ccFakeReader) HasTransactions(ctx context.Context, cardID string) (bool, error) {
+	var n int
+	if err := f.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions WHERE credit_card_id = ?", cardID).Scan(&n); err != nil {
+		return false, err
 	}
-	return false, nil
-}
-
-type ccFakeSubs struct{}
-
-func (ccFakeSubs) GetSubcategoryType(_ context.Context, _ string) (string, error) {
-	return "transferencia", nil
+	return n > 0, nil
 }
 
 func newCCRouter(db *sql.DB, reader creditcard.CardTransactionReader) http.Handler {
 	ccRepo := creditcard.NewSQLiteCreditCardRepository(db)
-	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	payWriter := creditcard.NewSQLiteInvoicePaymentRepository(db)
 	h := creditcard.NewHandler(creditcard.HandlerDeps{
 		Create:       creditcard.NewCreateCreditCard(ccRepo),
-		Get:          creditcard.NewGetCreditCard(ccRepo, payRepo, reader),
-		List:         creditcard.NewListCreditCards(ccRepo, payRepo, reader),
+		Get:          creditcard.NewGetCreditCard(ccRepo, reader),
+		List:         creditcard.NewListCreditCards(ccRepo, reader),
 		Update:       creditcard.NewUpdateCreditCard(ccRepo),
 		Delete:       creditcard.NewDeleteCreditCard(ccRepo, reader),
 		Archive:      creditcard.NewArchiveCreditCard(ccRepo),
-		ListInvoices: creditcard.NewListInvoices(ccRepo, payRepo, reader),
-		GetInvoice:   creditcard.NewGetInvoice(ccRepo, payRepo, reader),
-		AddPayment:   creditcard.NewAddInvoicePayment(ccRepo, payRepo, reader, ccFakeSubs{}),
-		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, payRepo, reader),
+		ListInvoices: creditcard.NewListInvoices(ccRepo, reader),
+		GetInvoice:   creditcard.NewGetInvoice(ccRepo, reader),
+		PayInvoice:   creditcard.NewPayInvoice(ccRepo, reader, payWriter),
+		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, reader, payWriter),
 		MonthSummary: creditcard.NewMonthlyCardSummary(ccRepo, reader),
 	})
 	r := chi.NewRouter()
@@ -90,13 +102,7 @@ func TestCreditCardRoutes_FullFlow(t *testing.T) {
 	// ajusta competência das compras para o ciclo passado
 	db.Exec("UPDATE transactions SET competence_date='2026-01-15' WHERE id IN ('compra-1','compra-2')")
 
-	reader := ccFakeReader{txns: []shared.CardTransaction{
-		{ID: "compra-1", Amount: 20000, CompetenceDate: "2026-01-15", Status: "pendente", CreditCardID: "c1",
-			CategoryID: "cat", CategoryName: "Cat", CategoryColor: "#fff", SubcategoryID: "sub", SubcategoryName: "Sub"},
-		{ID: "compra-2", Amount: 10000, CompetenceDate: "2026-01-15", Status: "pendente", CreditCardID: "c1",
-			CategoryID: "cat", CategoryName: "Cat", CategoryColor: "#fff", SubcategoryID: "sub", SubcategoryName: "Sub"},
-	}}
-	router := newCCRouter(db, reader)
+	router := newCCRouter(db, ccFakeReader{db: db})
 
 	// List
 	if code, _ := ccReq(t, router, http.MethodGet, "/api/credit-cards", ""); code != http.StatusOK {
@@ -160,20 +166,14 @@ func TestCreditCardRoutes_FullFlow(t *testing.T) {
 		t.Errorf("get invoice missing: got %d, want 404", code)
 	}
 
-	// Pagar a fatura inteira (total 30000) → quitada; depois desfazer pelo id do pagamento.
-	code, resp := ccReq(t, router, http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments",
-		`{"amount":30000,"payment_date":"2026-06-20","subcategory_id":"sub-trf-pgto"}`)
+	// Pagar a fatura (marca as compras em aberto como pagas na data) → quitada.
+	code, resp := ccReq(t, router, http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/pay",
+		`{"payment_date":"2026-06-20"}`)
 	if code != http.StatusOK || resp["payment_status"] != "paga" {
 		t.Fatalf("pay: got %d body %v", code, resp)
 	}
-	payID := ""
-	if ps, ok := resp["payments"].([]any); ok && len(ps) == 1 {
-		payID, _ = ps[0].(map[string]any)["id"].(string)
-	}
-	if payID == "" {
-		t.Fatalf("id do pagamento ausente: %v", resp["payments"])
-	}
-	if code, _ := ccReq(t, router, http.MethodDelete, "/api/credit-cards/c1/invoices/2026-02/payments/"+payID, ""); code != http.StatusOK {
+	// desfazer pela data do pagamento.
+	if code, _ := ccReq(t, router, http.MethodDelete, "/api/credit-cards/c1/invoices/2026-02/payments/2026-06-20", ""); code != http.StatusOK {
 		t.Errorf("undo: got %d", code)
 	}
 
@@ -190,7 +190,7 @@ func TestCreditCardRoutes_ErrorPaths(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	creditcard.NewSQLiteCreditCardRepository(db).Create(ctx, mkCard("c1", "Nubank", false))
-	router := newCCRouter(db, ccFakeReader{})
+	router := newCCRouter(db, ccFakeReader{db: db})
 
 	cases := []struct {
 		name, method, path, body string
@@ -205,11 +205,10 @@ func TestCreditCardRoutes_ErrorPaths(t *testing.T) {
 		{"summary missing card", http.MethodGet, "/api/credit-cards/nope/summary?year=2026&month=1", "", http.StatusNotFound},
 		{"invoices missing card", http.MethodGet, "/api/credit-cards/nope/invoices", "", http.StatusNotFound},
 		{"get invoice missing card", http.MethodGet, "/api/credit-cards/nope/invoices/2026-01", "", http.StatusNotFound},
-		{"pay bad json", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments", `{`, http.StatusBadRequest},
-		{"pay missing subcategory", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments", `{"amount":100,"payment_date":"2026-06-20"}`, http.StatusBadRequest},
-		{"pay invalid amount", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/payments", `{"amount":0,"payment_date":"2026-06-20","subcategory_id":"s"}`, http.StatusBadRequest},
-		{"pay nonexistent invoice", http.MethodPost, "/api/credit-cards/c1/invoices/2099-01/payments", `{"amount":100,"payment_date":"2026-06-20","subcategory_id":"s"}`, http.StatusNotFound},
-		{"undo nonexistent payment", http.MethodDelete, "/api/credit-cards/c1/invoices/2099-01/payments/nope", "", http.StatusNotFound},
+		{"pay bad json", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/pay", `{`, http.StatusBadRequest},
+		{"pay invalid date", http.MethodPost, "/api/credit-cards/c1/invoices/2026-02/pay", `{"payment_date":"20/06/2026"}`, http.StatusBadRequest},
+		{"pay nonexistent invoice", http.MethodPost, "/api/credit-cards/c1/invoices/2099-01/pay", `{"payment_date":"2026-06-20"}`, http.StatusNotFound},
+		{"undo nonexistent payment", http.MethodDelete, "/api/credit-cards/c1/invoices/2099-01/payments/2026-06-20", "", http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		if code, _ := ccReq(t, router, tc.method, tc.path, tc.body); code != tc.want {
@@ -230,7 +229,7 @@ func TestCreditCardRoutes_ErrorPaths(t *testing.T) {
 func TestCreditCardRepo_DBErrors(t *testing.T) {
 	db := newTestDB(t)
 	ccRepo := creditcard.NewSQLiteCreditCardRepository(db)
-	payRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
+	payWriter := creditcard.NewSQLiteInvoicePaymentRepository(db)
 	ctx := context.Background()
 	p := shared.Pagination{Page: 1, Limit: 10, OrderBy: "created_at", Order: "DESC"}
 	db.Close()
@@ -253,16 +252,11 @@ func TestCreditCardRepo_DBErrors(t *testing.T) {
 	if err := ccRepo.Delete(ctx, "c"); err == nil {
 		t.Error("Delete deveria falhar")
 	}
-	if _, err := payRepo.ListByCard(ctx, "c"); err == nil {
-		t.Error("payment ListByCard deveria falhar")
+	if err := payWriter.MarkInvoicePaid(ctx, []string{"x"}, "2026-01-10"); err == nil {
+		t.Error("MarkInvoicePaid deveria falhar")
 	}
-	if err := payRepo.AddPaymentAtomic(ctx, creditcard.AtomicAddPaymentInput{
-		CardID: "c", Entry: creditcard.InvoicePayment{ID: "e", Reference: "2026-01", Amount: 100}, Payment: mkPaymentTxn("p"),
-	}); err == nil {
-		t.Error("AddPaymentAtomic deveria falhar")
-	}
-	if err := payRepo.RemovePaymentAtomic(ctx, creditcard.AtomicRemovePaymentInput{PaymentID: "e"}); err == nil {
-		t.Error("RemovePaymentAtomic deveria falhar")
+	if err := payWriter.RevertInvoicePayment(ctx, []string{"x"}); err == nil {
+		t.Error("RevertInvoicePayment deveria falhar")
 	}
 }
 

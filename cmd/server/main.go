@@ -185,9 +185,9 @@ func run(log *slog.Logger) error {
 
 	// Cartão de crédito: repos + facades cross-module.
 	ccRepo := creditcard.NewSQLiteCreditCardRepository(db)
-	ccPayRepo := creditcard.NewSQLiteInvoicePaymentRepository(db)
-	cardChecker := creditcard.NewCreditCardChecker(ccRepo) // transaction valida vínculo via este facade
-	cardReader := transaction.NewCardReader(db)            // creditcard lê lançamentos via este facade
+	ccPayWriter := creditcard.NewSQLiteInvoicePaymentRepository(db) // marca/reverte compras pagas
+	cardChecker := creditcard.NewCreditCardChecker(ccRepo)          // transaction valida vínculo via este facade
+	cardReader := transaction.NewCardReader(db)                     // creditcard lê lançamentos via este facade
 
 	// Relatórios (report): owner do fechamento/snapshot. Consome aggregators do
 	// transaction (realizado/pendente/forma de pagamento) e a árvore do category —
@@ -230,15 +230,15 @@ func run(log *slog.Logger) error {
 
 	creditCardHandler := creditcard.NewHandler(creditcard.HandlerDeps{
 		Create:       creditcard.NewCreateCreditCard(ccRepo),
-		Get:          creditcard.NewGetCreditCard(ccRepo, ccPayRepo, cardReader),
-		List:         creditcard.NewListCreditCards(ccRepo, ccPayRepo, cardReader),
+		Get:          creditcard.NewGetCreditCard(ccRepo, cardReader),
+		List:         creditcard.NewListCreditCards(ccRepo, cardReader),
 		Update:       creditcard.NewUpdateCreditCard(ccRepo),
 		Delete:       creditcard.NewDeleteCreditCard(ccRepo, cardReader),
 		Archive:      creditcard.NewArchiveCreditCard(ccRepo),
-		ListInvoices: creditcard.NewListInvoices(ccRepo, ccPayRepo, cardReader),
-		GetInvoice:   creditcard.NewGetInvoice(ccRepo, ccPayRepo, cardReader),
-		AddPayment:   creditcard.NewAddInvoicePayment(ccRepo, ccPayRepo, cardReader, catFacade),
-		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, ccPayRepo, cardReader),
+		ListInvoices: creditcard.NewListInvoices(ccRepo, cardReader),
+		GetInvoice:   creditcard.NewGetInvoice(ccRepo, cardReader),
+		PayInvoice:   creditcard.NewPayInvoice(ccRepo, cardReader, ccPayWriter),
+		UndoPayment:  creditcard.NewUndoInvoicePayment(ccRepo, cardReader, ccPayWriter),
 		MonthSummary: creditcard.NewMonthlyCardSummary(ccRepo, cardReader),
 	})
 

@@ -225,6 +225,19 @@ FROM transactions t
 JOIN subcategories s ON s.id = t.subcategory_id
 JOIN categories    c ON c.id = s.category_id`
 
+// effectiveCashDate é a data que define em qual mês o lançamento pesa no CAIXA: compras de
+// cartão pela data de pagamento (quando a fatura é paga), demais pela competência.
+const effectiveCashDate = "(CASE WHEN t.credit_card_id IS NOT NULL THEN t.payment_date ELSE t.competence_date END)"
+
+// buildFilterNoDate é o buildFilter sem as condições de data — o resumo de caixa aplica o
+// período sobre a data efetiva de caixa (effectiveCashDate), não sobre a competência crua.
+func buildFilterNoDate(f TransactionFilter) (string, []any) {
+	nf := f
+	nf.CompetenceDateFrom, nf.CompetenceDateTo = nil, nil
+	nf.PaymentDateFrom, nf.PaymentDateTo = nil, nil
+	return buildFilter(nf)
+}
+
 func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) (Summary, error) {
 	where, args := buildFilter(f)
 
@@ -241,12 +254,24 @@ func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) 
 		return Summary{}, fmt.Errorf("transaction sqlite: summary count: %w", err)
 	}
 
-	// D14 (regime de caixa): compras no cartão NÃO entram nos TOTAIS de dinheiro — só o
-	// pagamento da fatura (lançamento normal, sem credit_card_id) conta. A cláusula vai
-	// só aqui, nas somas; List e CountTotal continuam contando o cartão.
-	query := fmt.Sprintf("%s WHERE %s AND t.credit_card_id IS NULL GROUP BY t.type, t.status", summaryBaseSQL, where)
+	// D14 (regime de caixa, Opção 1): cada lançamento entra nos totais pela DATA EFETIVA DE
+	// CAIXA — competência para lançamentos normais, e DATA DE PAGAMENTO para compras de
+	// cartão (o dinheiro do cartão só sai quando a fatura é paga). Compra de cartão pendente
+	// (sem payment_date) não entra no realizado. O período (datas do filtro) é aplicado sobre
+	// essa data efetiva.
+	noDate, ndArgs := buildFilterNoDate(f)
+	query := fmt.Sprintf("%s WHERE %s", summaryBaseSQL, noDate)
+	if f.CompetenceDateFrom != nil {
+		query += " AND " + effectiveCashDate + " >= ?"
+		ndArgs = append(ndArgs, *f.CompetenceDateFrom)
+	}
+	if f.CompetenceDateTo != nil {
+		query += " AND " + effectiveCashDate + " <= ?"
+		ndArgs = append(ndArgs, *f.CompetenceDateTo)
+	}
+	query += " GROUP BY t.type, t.status"
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.QueryContext(ctx, query, ndArgs...)
 	if err != nil {
 		return Summary{}, fmt.Errorf("transaction sqlite: get summary: %w", err)
 	}
@@ -307,13 +332,16 @@ func (r *SQLiteRepository) carryoverBalance(ctx context.Context, from *string) (
 	if from == nil {
 		return 0, nil
 	}
+	// Saldo acumulado em caixa: inclui compras de cartão já pagas (pela data de pagamento)
+	// e os demais lançamentos pela competência — tudo com data efetiva ANTES de `from`.
 	const q = `
 SELECT COALESCE(SUM(CASE
 		WHEN t.type = 'receita' THEN t.amount
 		WHEN t.type = 'despesa' THEN -t.amount
 		ELSE 0 END), 0)
 FROM transactions t
-WHERE t.status = 'realizado' AND t.credit_card_id IS NULL AND t.competence_date < ?`
+WHERE t.status = 'realizado'
+  AND (CASE WHEN t.credit_card_id IS NOT NULL THEN t.payment_date ELSE t.competence_date END) < ?`
 	var v int64
 	if err := r.db.QueryRowContext(ctx, q, *from).Scan(&v); err != nil {
 		return 0, fmt.Errorf("transaction sqlite: carryover: %w", err)
