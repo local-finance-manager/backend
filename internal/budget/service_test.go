@@ -23,11 +23,11 @@ func newDB(t *testing.T) *sql.DB {
 			mode TEXT NOT NULL, percentage INTEGER, fixed_amount INTEGER, preset_subcategory_id TEXT,
 			preset_payment_method TEXT, preset_description TEXT, display_order INTEGER NOT NULL DEFAULT 0,
 			materialized_transaction_id TEXT, materialized_amount INTEGER, materialized_at TEXT,
-			created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL, caixinha_id TEXT)`,
 		`CREATE TABLE allocation_template (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE allocation_template_item (id TEXT PRIMARY KEY, template_id TEXT NOT NULL, name TEXT NOT NULL,
 			kind TEXT NOT NULL, mode TEXT NOT NULL, percentage INTEGER, fixed_amount INTEGER,
-			preset_subcategory_id TEXT, preset_payment_method TEXT, preset_description TEXT, display_order INTEGER NOT NULL DEFAULT 0)`,
+			preset_subcategory_id TEXT, preset_payment_method TEXT, preset_description TEXT, display_order INTEGER NOT NULL DEFAULT 0, caixinha_id TEXT)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -85,6 +85,19 @@ func newSvc(t *testing.T, income *fakeIncome, writer *fakeWriter) *Service {
 	})
 }
 
+type fakeAporter struct {
+	caixinhaID string
+	amount     int64
+	calls      int
+}
+
+func (f *fakeAporter) RegisterAporte(_ context.Context, caixinhaID string, amount int64, _ string, _ *string) (string, error) {
+	f.calls++
+	f.caixinhaID = caixinhaID
+	f.amount = amount
+	return "tx-aporte", nil
+}
+
 // ── testes ──────────────────────────────────────────────────────────────────
 
 func TestService_CreateAndPlan(t *testing.T) {
@@ -116,6 +129,41 @@ func TestService_CreateBlocksOverAllocation(t *testing.T) {
 	_, err := svc.CreateDestination(ctx, DestinationInput{Reference: "2026-06", Name: "B", Kind: KindDespesa, Mode: ModePercentual, Percentage: pct(2000)})
 	if err != ErrOverAllocated {
 		t.Fatalf("esperava ErrOverAllocated, got %v", err)
+	}
+}
+
+func TestService_MaterializeCaixinha(t *testing.T) {
+	writer := &fakeWriter{}
+	aporter := &fakeAporter{}
+	svc := NewService(Deps{
+		Repo: NewSQLiteRepository(newDB(t)), Income: &fakeIncome{total: 500000, allRealized: true},
+		Txns: writer, Caixinha: aporter, InvestSubcatID: "sub-trf-aporte",
+	})
+	ctx := context.Background()
+	d, err := svc.CreateDestination(ctx, DestinationInput{
+		Reference: "2026-06", Name: "Investir", Kind: KindInvestimento, Mode: ModePercentual,
+		Percentage: pct(2000), CaixinhaID: strp("cx1"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	res, err := svc.Materialize(ctx, d.ID, MaterializeInput{})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if aporter.calls != 1 || aporter.caixinhaID != "cx1" || aporter.amount != 100000 {
+		t.Fatalf("deveria aportar 100000 em cx1: calls=%d cx=%s amt=%d", aporter.calls, aporter.caixinhaID, aporter.amount)
+	}
+	if len(writer.created) != 0 {
+		t.Fatalf("destino de caixinha NÃO deveria criar lançamento normal: %+v", writer.created)
+	}
+	if res.TransactionID != "tx-aporte" {
+		t.Fatalf("txID do aporte inesperado: %s", res.TransactionID)
+	}
+	// o plano expõe o caixinhaId do destino
+	plan, _ := svc.GetPlan(ctx, "2026-06")
+	if plan.Destinations[0].CaixinhaID == nil || *plan.Destinations[0].CaixinhaID != "cx1" {
+		t.Fatalf("plan deveria expor caixinhaId: %+v", plan.Destinations[0])
 	}
 }
 

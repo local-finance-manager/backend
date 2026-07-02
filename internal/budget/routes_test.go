@@ -31,11 +31,11 @@ func newDB(t *testing.T) *sql.DB {
 			mode TEXT NOT NULL, percentage INTEGER, fixed_amount INTEGER, preset_subcategory_id TEXT,
 			preset_payment_method TEXT, preset_description TEXT, display_order INTEGER NOT NULL DEFAULT 0,
 			materialized_transaction_id TEXT, materialized_amount INTEGER, materialized_at TEXT,
-			created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL, caixinha_id TEXT)`,
 		`CREATE TABLE allocation_template (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE allocation_template_item (id TEXT PRIMARY KEY, template_id TEXT NOT NULL, name TEXT NOT NULL,
 			kind TEXT NOT NULL, mode TEXT NOT NULL, percentage INTEGER, fixed_amount INTEGER,
-			preset_subcategory_id TEXT, preset_payment_method TEXT, preset_description TEXT, display_order INTEGER NOT NULL DEFAULT 0)`,
+			preset_subcategory_id TEXT, preset_payment_method TEXT, preset_description TEXT, display_order INTEGER NOT NULL DEFAULT 0, caixinha_id TEXT)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

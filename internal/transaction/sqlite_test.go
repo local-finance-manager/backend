@@ -50,11 +50,31 @@ func newTestDB(t *testing.T) *sql.DB {
 		color                 TEXT,
 		can_be_deleted        INTEGER NOT NULL DEFAULT 1,
 		is_balance_adjustment INTEGER NOT NULL DEFAULT 0,
+		caixinha_direction    TEXT,
 		created_at            TEXT NOT NULL,
 		updated_at            TEXT NOT NULL
 	)`)
 	if err != nil {
 		t.Fatalf("create subcategories: %v", err)
+	}
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS caixinhas (
+		id                 TEXT PRIMARY KEY,
+		name               TEXT NOT NULL,
+		type               TEXT NOT NULL,
+		meta_valor         INTEGER,
+		data_alvo          TEXT,
+		valor_mercado      INTEGER,
+		data_valor_mercado TEXT,
+		color              TEXT,
+		icon               TEXT,
+		display_order      INTEGER NOT NULL DEFAULT 0,
+		archived           INTEGER NOT NULL DEFAULT 0,
+		created_at         TEXT NOT NULL,
+		updated_at         TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create caixinhas: %v", err)
 	}
 
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS transactions (
@@ -74,6 +94,7 @@ func newTestDB(t *testing.T) *sql.DB {
 		account_id              TEXT,
 		destination_account_id  TEXT,
 		credit_card_id          TEXT,
+		caixinha_id             TEXT    REFERENCES caixinhas(id),
 		installment_group_id    TEXT,
 		installment_number      INTEGER,
 		installment_total       INTEGER,

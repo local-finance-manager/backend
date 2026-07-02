@@ -30,7 +30,7 @@ func TestService_ClosedMonthsComparativeAndLong(t *testing.T) {
 	}
 
 	// mensal de mês fechado → lê snapshot; comparativo com maio (fechado, não-parcial)
-	rep, err := svc.Monthly(ctx, "2026-06", "realizado")
+	rep, err := svc.Monthly(ctx, "2026-06", "realizado", RegimeCompetencia)
 	if err != nil {
 		t.Fatalf("monthly: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestService_ClosedMonthsComparativeAndLong(t *testing.T) {
 	}
 
 	// trimestral Q2 com os 3 meses fechados
-	q, err := svc.Quarterly(ctx, 2026, 2)
+	q, err := svc.Quarterly(ctx, 2026, 2, RegimeCompetencia)
 	if err != nil {
 		t.Fatalf("quarterly: %v", err)
 	}
@@ -54,10 +54,10 @@ func TestService_ClosedMonthsComparativeAndLong(t *testing.T) {
 	}
 
 	// anual e semestral exercitam os caminhos longos
-	if _, err := svc.Annual(ctx, 2026); err != nil {
+	if _, err := svc.Annual(ctx, 2026, RegimeCompetencia); err != nil {
 		t.Fatalf("annual: %v", err)
 	}
-	if _, err := svc.Semiannual(ctx, 2026, 1); err != nil {
+	if _, err := svc.Semiannual(ctx, 2026, 1, RegimeCompetencia); err != nil {
 		t.Fatalf("semiannual: %v", err)
 	}
 
@@ -132,13 +132,14 @@ func TestService_ErrorPaths(t *testing.T) {
 	// service com DB fechado → erros de repositório nos handlers e leituras.
 	db := newReportDB(t)
 	repo := NewSQLiteRepository(db)
-	svc := NewService(Deps{Repo: repo, Realized: fr, Pending: &fakePending{}, Tree: fakeTree{}, Payments: fakePayments{m: map[string]int64{}}})
+	svc := NewService(Deps{Repo: repo, Realized: fr, Pending: &fakePending{}, Tree: fakeTree{}, Payments: fakePayments{m: map[string]int64{}}, Cash: &fakeCash{pay: map[string]int64{}}})
 	db.Close()
 	router := newRouter(svc)
 
+	// regime=competencia força o caminho de snapshot (repositório) → 500 com DB fechado.
 	for _, p := range []string{
-		"/api/reports/monthly?reference=2026-06",
-		"/api/reports/annual?year=2026",
+		"/api/reports/monthly?reference=2026-06&regime=competencia",
+		"/api/reports/annual?year=2026&regime=competencia",
 		"/api/reports/closings",
 	} {
 		if c, _ := do(t, router, http.MethodGet, p, ""); c != http.StatusInternalServerError {
@@ -152,13 +153,13 @@ func TestService_ErrorPaths(t *testing.T) {
 	// tree com erro → lookup falha no Monthly.
 	svc2 := newSvc(t, "2026-07-05", fr)
 	svc2.tree = errTree{}
-	if _, err := svc2.Monthly(context.Background(), "2026-06", "realizado"); err == nil {
+	if _, err := svc2.Monthly(context.Background(), "2026-06", "realizado", RegimeCompetencia); err == nil {
 		t.Error("Monthly deveria falhar com tree em erro")
 	}
 
 	// Q1 cobre o ramo de "trimestre anterior = Q4 do ano anterior".
 	svc3 := newSvc(t, "2026-07-05", fr)
-	if _, err := svc3.Quarterly(context.Background(), 2026, 1); err != nil {
+	if _, err := svc3.Quarterly(context.Background(), 2026, 1, RegimeCompetencia); err != nil {
 		t.Errorf("quarterly Q1: %v", err)
 	}
 }
