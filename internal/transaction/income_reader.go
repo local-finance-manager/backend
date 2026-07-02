@@ -23,14 +23,18 @@ func (r *IncomeReader) MonthIncome(ctx context.Context, reference string) (int64
 	if err != nil {
 		return 0, false, nil, err
 	}
+	// Renda por REGIME DE CAIXA: uma receita realizada pertence ao mês em que o dinheiro
+	// caiu (data de pagamento); pendente pertence ao mês da competência (data esperada).
+	// Assim salário de competência 30/jun pago em 01/jul conta como renda de JULHO.
+	const cashDate = "(CASE WHEN t.payment_date IS NOT NULL THEN t.payment_date ELSE t.competence_date END)"
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT t.id, t.title, t.amount, t.status
 		FROM transactions t
 		JOIN subcategories s ON s.id = t.subcategory_id
 		WHERE t.type = 'receita' AND t.status IN ('pendente','realizado')
 		  AND s.is_balance_adjustment = 0
-		  AND t.competence_date >= ? AND t.competence_date <= ?
-		ORDER BY t.competence_date, t.created_at`, first, last)
+		  AND `+cashDate+` >= ? AND `+cashDate+` <= ?
+		ORDER BY `+cashDate+`, t.created_at`, first, last)
 	if err != nil {
 		return 0, false, nil, fmt.Errorf("income reader: query: %w", err)
 	}

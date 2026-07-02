@@ -94,6 +94,7 @@ type Report struct {
 	Year         int          `json:"year,omitempty"`
 	Quarter      int          `json:"quarter,omitempty"`
 	Half         int          `json:"half,omitempty"`
+	Regime       string       `json:"regime,omitempty"` // "caixa" (padrão) | "competencia"
 	Mode         string       `json:"mode,omitempty"`
 	Status       LockState    `json:"status,omitempty"`
 	KPIs         KPIs         `json:"kpis"`

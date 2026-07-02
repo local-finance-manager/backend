@@ -26,8 +26,8 @@ const createSQL = `
 INSERT INTO transactions (
     id, title, description, amount, type, subcategory_id,
     payment_method, status, competence_date, payment_date,
-    account_id, destination_account_id, credit_card_id, created_at, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    account_id, destination_account_id, credit_card_id, caixinha_id, created_at, updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 	_, err := r.db.ExecContext(ctx, createSQL,
@@ -38,6 +38,7 @@ func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 		nullStr(deref(t.AccountID)),
 		nullStr(deref(t.DestinationAccountID)),
 		nullStr(deref(t.CreditCardID)),
+		nullStr(deref(t.CaixinhaID)),
 		t.CreatedAt.UTC().Format(time.RFC3339),
 		t.UpdatedAt.UTC().Format(time.RFC3339),
 	)
@@ -52,7 +53,7 @@ func (r *SQLiteRepository) Create(ctx context.Context, t Transaction) error {
 const getSQL = `
 SELECT t.id, t.title, t.description, t.amount, t.type, t.subcategory_id,
        t.payment_method, t.status, t.competence_date, t.payment_date,
-       t.account_id, t.destination_account_id, t.credit_card_id,
+       t.account_id, t.destination_account_id, t.credit_card_id, t.caixinha_id,
        t.installment_group_id, t.installment_number, t.installment_total, t.created_at, t.updated_at,
        s.id, s.name, COALESCE(s.icon,''), COALESCE(s.color,''),
        c.id, c.name, COALESCE(c.icon,''), COALESCE(c.color,'')
@@ -148,12 +149,15 @@ func buildFilter(f TransactionFilter) (string, []any) {
 		conds = append(conds, "t.account_id = ?")
 		args = append(args, *f.AccountID)
 	}
+	// A tela de Lançamentos navega por MÊS DE CAIXA: o período filtra a data efetiva de
+	// caixa (pagamento p/ realizado, competência p/ pendente), não a competência crua.
+	// Assim uma receita de competência 30/jun paga em 01/jul aparece em JULHO.
 	if f.CompetenceDateFrom != nil {
-		conds = append(conds, "t.competence_date >= ?")
+		conds = append(conds, effectiveCashDate+" >= ?")
 		args = append(args, *f.CompetenceDateFrom)
 	}
 	if f.CompetenceDateTo != nil {
-		conds = append(conds, "t.competence_date <= ?")
+		conds = append(conds, effectiveCashDate+" <= ?")
 		args = append(args, *f.CompetenceDateTo)
 	}
 	if f.PaymentDateFrom != nil {
@@ -176,6 +180,15 @@ func buildFilter(f TransactionFilter) (string, []any) {
 		conds = append(conds, "t.installment_group_id = ?")
 		args = append(args, *f.InstallmentGroupID)
 	}
+	// Movimentos de caixinha (aporte/resgate) só aparecem quando explicitamente pedidos
+	// (extrato via CaixinhaID) ou quando IncludeCaixinha=true. Por padrão são escondidos
+	// da lista de Lançamentos — o oposto do "transferência" que poluía a lista.
+	if f.CaixinhaID != nil {
+		conds = append(conds, "t.caixinha_id = ?")
+		args = append(args, *f.CaixinhaID)
+	} else if !f.IncludeCaixinha {
+		conds = append(conds, "t.caixinha_id IS NULL")
+	}
 
 	return strings.Join(conds, " AND "), args
 }
@@ -185,7 +198,7 @@ func buildFilter(f TransactionFilter) (string, []any) {
 const listBaseSQL = `
 SELECT t.id, t.title, t.description, t.amount, t.type, t.subcategory_id,
        t.payment_method, t.status, t.competence_date, t.payment_date,
-       t.account_id, t.destination_account_id, t.credit_card_id,
+       t.account_id, t.destination_account_id, t.credit_card_id, t.caixinha_id,
        t.installment_group_id, t.installment_number, t.installment_total, t.created_at, t.updated_at,
        s.id, s.name, COALESCE(s.icon,''), COALESCE(s.color,''),
        c.id, c.name, COALESCE(c.icon,''), COALESCE(c.color,'')
@@ -225,9 +238,10 @@ FROM transactions t
 JOIN subcategories s ON s.id = t.subcategory_id
 JOIN categories    c ON c.id = s.category_id`
 
-// effectiveCashDate é a data que define em qual mês o lançamento pesa no CAIXA: compras de
-// cartão pela data de pagamento (quando a fatura é paga), demais pela competência.
-const effectiveCashDate = "(CASE WHEN t.credit_card_id IS NOT NULL THEN t.payment_date ELSE t.competence_date END)"
+// effectiveCashDate é a data que define em qual mês o lançamento pesa no CAIXA: pela DATA
+// DE PAGAMENTO quando existe (todo realizado tem; compra de cartão usa a data de pagamento
+// da fatura), e pela competência apenas quando não há pagamento (pendente = data esperada).
+const effectiveCashDate = "(CASE WHEN t.payment_date IS NOT NULL THEN t.payment_date ELSE t.competence_date END)"
 
 // buildFilterNoDate é o buildFilter sem as condições de data — o resumo de caixa aplica o
 // período sobre a data efetiva de caixa (effectiveCashDate), não sobre a competência crua.
@@ -320,9 +334,45 @@ func (r *SQLiteRepository) GetSummary(ctx context.Context, f TransactionFilter) 
 	if err != nil {
 		return Summary{}, err
 	}
+	// Movimentos de caixinha no período (resgate +, aporte −), pela data de caixa. Como
+	// SaldoInicial/SaldoFinal, usa SÓ as datas do filtro (ignora tipo/categoria/busca).
+	mov, err := r.movimentacaoCaixinhas(ctx, f.CompetenceDateFrom, f.CompetenceDateTo)
+	if err != nil {
+		return Summary{}, err
+	}
+	s.MovimentacaoCaixinhas = mov
 	s.SaldoInicial = carryover + adjustments
-	s.SaldoFinal = s.SaldoInicial + s.SaldoPeriodo
+	s.SaldoFinal = s.SaldoInicial + s.SaldoPeriodo + s.MovimentacaoCaixinhas
 	return s, nil
+}
+
+// movimentacaoCaixinhas soma o efeito líquido dos movimentos de caixinha REALIZADOS
+// (resgate +, aporte −) com data de caixa (payment_date) no intervalo [from, to].
+func (r *SQLiteRepository) movimentacaoCaixinhas(ctx context.Context, from, to *string) (int64, error) {
+	// is_balance_adjustment=0 exclui o SALDO INICIAL da caixinha (abertura), que estabelece
+	// patrimônio guardado sem mover o disponível.
+	q := `
+SELECT COALESCE(SUM(CASE
+		WHEN s.caixinha_direction = 'resgate' THEN t.amount
+		WHEN s.caixinha_direction = 'aporte'  THEN -t.amount
+		ELSE 0 END), 0)
+FROM transactions t
+JOIN subcategories s ON s.id = t.subcategory_id
+WHERE t.status = 'realizado' AND t.caixinha_id IS NOT NULL AND s.is_balance_adjustment = 0`
+	args := []any{}
+	if from != nil {
+		q += " AND t.payment_date >= ?"
+		args = append(args, *from)
+	}
+	if to != nil {
+		q += " AND t.payment_date <= ?"
+		args = append(args, *to)
+	}
+	var v int64
+	if err := r.db.QueryRowContext(ctx, q, args...).Scan(&v); err != nil {
+		return 0, fmt.Errorf("transaction sqlite: movimentacao caixinhas: %w", err)
+	}
+	return v, nil
 }
 
 // carryoverBalance soma o fluxo (receita - despesa) de lançamentos realizados, sem cartão
@@ -332,16 +382,20 @@ func (r *SQLiteRepository) carryoverBalance(ctx context.Context, from *string) (
 	if from == nil {
 		return 0, nil
 	}
-	// Saldo acumulado em caixa: inclui compras de cartão já pagas (pela data de pagamento)
-	// e os demais lançamentos pela competência — tudo com data efetiva ANTES de `from`.
+	// Saldo acumulado em caixa: inclui compras de cartão já pagas (pela data de pagamento),
+	// os demais lançamentos pela competência, e os movimentos de caixinha (resgate +,
+	// aporte −) — tudo com data efetiva ANTES de `from`.
 	const q = `
 SELECT COALESCE(SUM(CASE
+		WHEN s.caixinha_direction = 'resgate' AND s.is_balance_adjustment = 0 THEN t.amount
+		WHEN s.caixinha_direction = 'aporte'  AND s.is_balance_adjustment = 0 THEN -t.amount
 		WHEN t.type = 'receita' THEN t.amount
 		WHEN t.type = 'despesa' THEN -t.amount
 		ELSE 0 END), 0)
 FROM transactions t
+JOIN subcategories s ON s.id = t.subcategory_id
 WHERE t.status = 'realizado'
-  AND (CASE WHEN t.credit_card_id IS NOT NULL THEN t.payment_date ELSE t.competence_date END) < ?`
+  AND ` + effectiveCashDate + ` < ?`
 	var v int64
 	if err := r.db.QueryRowContext(ctx, q, *from).Scan(&v); err != nil {
 		return 0, fmt.Errorf("transaction sqlite: carryover: %w", err)
@@ -353,14 +407,16 @@ WHERE t.status = 'realizado'
 // (inclusive). São transferências que estabelecem patrimônio → entram no saldo acumulado,
 // não no fluxo. Sem `to` (período aberto à direita) soma todos os ajustes.
 func (r *SQLiteRepository) adjustmentsTotal(ctx context.Context, to *string) (int64, error) {
+	// caixinha_id IS NULL: o SALDO INICIAL da caixinha também é is_balance_adjustment, mas
+	// alimenta o GUARDADO (não o disponível) — não pode entrar aqui.
 	q := `
 SELECT COALESCE(SUM(t.amount), 0)
 FROM transactions t
 JOIN subcategories s ON s.id = t.subcategory_id
-WHERE t.status = 'realizado' AND s.is_balance_adjustment = 1`
+WHERE t.status = 'realizado' AND s.is_balance_adjustment = 1 AND t.caixinha_id IS NULL`
 	args := []any{}
 	if to != nil {
-		q += " AND t.competence_date <= ?"
+		q += " AND " + effectiveCashDate + " <= ?"
 		args = append(args, *to)
 	}
 	var v int64
@@ -377,14 +433,14 @@ type scanFunc func(dest ...any) error
 
 func scanDetail(scan scanFunc) (TransactionDetail, error) {
 	var d TransactionDetail
-	var desc, payDate, accID, destAccID, creditCardID, installmentGroupID sql.NullString
+	var desc, payDate, accID, destAccID, creditCardID, caixinhaID, installmentGroupID sql.NullString
 	var installmentNumber, installmentTotal sql.NullInt64
 	var createdAt, updatedAt string
 
 	err := scan(
 		&d.ID, &d.Title, &desc, &d.Amount, (*string)(&d.Type), &d.SubcategoryID,
 		(*string)(&d.PaymentMethod), (*string)(&d.Status),
-		&d.CompetenceDate, &payDate, &accID, &destAccID, &creditCardID,
+		&d.CompetenceDate, &payDate, &accID, &destAccID, &creditCardID, &caixinhaID,
 		&installmentGroupID, &installmentNumber, &installmentTotal,
 		&createdAt, &updatedAt,
 		&d.Subcategory.ID, &d.Subcategory.Name, &d.Subcategory.Icon, &d.Subcategory.Color,
@@ -409,6 +465,9 @@ func scanDetail(scan scanFunc) (TransactionDetail, error) {
 	}
 	if creditCardID.Valid {
 		d.CreditCardID = &creditCardID.String
+	}
+	if caixinhaID.Valid {
+		d.CaixinhaID = &caixinhaID.String
 	}
 	if installmentGroupID.Valid {
 		d.InstallmentGroupID = &installmentGroupID.String

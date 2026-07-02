@@ -53,6 +53,7 @@ type Destination struct {
 	PresetSubcategoryID *string
 	PresetPaymentMethod *string
 	PresetDescription   *string
+	CaixinhaID          *string // se setado, materializa como APORTE nesta caixinha
 	DisplayOrder        int
 	MaterializedTxID    *string
 	MaterializedAmount  *int64
@@ -75,6 +76,7 @@ type DestinationInput struct {
 	PresetSubcategoryID *string
 	PresetPaymentMethod *string
 	PresetDescription   *string
+	CaixinhaID          *string
 	DisplayOrder        int
 }
 

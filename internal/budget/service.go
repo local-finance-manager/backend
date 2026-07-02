@@ -15,7 +15,8 @@ type Deps struct {
 	Repo           Repository
 	Income         IncomeReader
 	Txns           TransactionWriter
-	InvestSubcatID string // subcategoria default p/ investimento sem preset (A4)
+	Caixinha       CaixinhaAporter // materializa aporte quando o destino aponta p/ caixinha
+	InvestSubcatID string          // subcategoria default p/ investimento sem preset (A4)
 }
 
 // Service orquestra os casos de uso de alocação de receitas.
@@ -23,13 +24,14 @@ type Service struct {
 	repo         Repository
 	income       IncomeReader
 	txns         TransactionWriter
+	caixinha     CaixinhaAporter
 	investSubcat string
 	now          func() time.Time
 }
 
 // NewService cria o serviço.
 func NewService(d Deps) *Service {
-	return &Service{repo: d.Repo, income: d.Income, txns: d.Txns, investSubcat: d.InvestSubcatID, now: time.Now}
+	return &Service{repo: d.Repo, income: d.Income, txns: d.Txns, caixinha: d.Caixinha, investSubcat: d.InvestSubcatID, now: time.Now}
 }
 
 // ─── Tipos de resposta (camelCase) ───────────────────────────────────────────
@@ -56,6 +58,7 @@ type DestinationView struct {
 	PresetSubcategoryID       *string `json:"presetSubcategoryId"`
 	PresetPaymentMethod       *string `json:"presetPaymentMethod"`
 	PresetDescription         *string `json:"presetDescription"`
+	CaixinhaID                *string `json:"caixinhaId"`
 	DisplayOrder              int     `json:"displayOrder"`
 }
 
@@ -121,7 +124,7 @@ func (s *Service) buildPlan(reference string, total int64, allRealized bool, ite
 			Percentage: d.Percentage, FixedAmount: d.FixedAmount, ComputedAmount: comp.ByDestination[d.ID],
 			Status: status, MaterializedTransactionID: d.MaterializedTxID, MaterializedAmount: d.MaterializedAmount,
 			PresetSubcategoryID: d.PresetSubcategoryID, PresetPaymentMethod: d.PresetPaymentMethod,
-			PresetDescription: d.PresetDescription, DisplayOrder: d.DisplayOrder,
+			PresetDescription: d.PresetDescription, CaixinhaID: d.CaixinhaID, DisplayOrder: d.DisplayOrder,
 		}
 	}
 
@@ -255,11 +258,7 @@ func (s *Service) Materialize(ctx context.Context, id string, in MaterializeInpu
 		amount = *in.Amount
 	}
 
-	tx, err := s.buildTransaction(cur, amount, in)
-	if err != nil {
-		return MaterializeResult{}, err
-	}
-	txID, err := s.txns.Create(ctx, tx)
+	txID, err := s.materializeTx(ctx, cur, amount, in)
 	if err != nil {
 		return MaterializeResult{}, err // erros de domínio (mês bloqueado, validação) propagam
 	}
@@ -272,6 +271,30 @@ func (s *Service) Materialize(ctx context.Context, id string, in MaterializeInpu
 		return MaterializeResult{}, ErrAlreadyMaterialized
 	}
 	return MaterializeResult{DestinationID: id, Status: "materializado", TransactionID: txID, Amount: amount}, nil
+}
+
+// materializeTx cria o lançamento do destino: um APORTE na caixinha (quando o destino
+// aponta para uma) ou um lançamento normal (despesa/transferência). Devolve o txID.
+func (s *Service) materializeTx(ctx context.Context, d Destination, amount int64, in MaterializeInput) (string, error) {
+	if d.CaixinhaID != nil && *d.CaixinhaID != "" {
+		if s.caixinha == nil {
+			return "", domainerr.NewInternal("aporte em caixinha indisponível")
+		}
+		date := s.today()
+		if in.PaymentDate != nil && *in.PaymentDate != "" {
+			date = *in.PaymentDate
+		}
+		desc := d.PresetDescription
+		if in.Description != nil {
+			desc = in.Description
+		}
+		return s.caixinha.RegisterAporte(ctx, *d.CaixinhaID, amount, date, desc)
+	}
+	tx, err := s.buildTransaction(d, amount, in)
+	if err != nil {
+		return "", err
+	}
+	return s.txns.Create(ctx, tx)
 }
 
 // buildTransaction monta o NewTransaction a partir do destino + presets + overrides.
@@ -369,7 +392,8 @@ func (s *Service) MaterializeAll(ctx context.Context, reference string) (BulkRes
 		if d.IsMaterialized() {
 			continue
 		}
-		if s.effectiveSubcategory(d) == "" {
+		isCaixinha := d.CaixinhaID != nil && *d.CaixinhaID != ""
+		if !isCaixinha && s.effectiveSubcategory(d) == "" {
 			res.Skipped = append(res.Skipped, SkippedDestination{
 				DestinationID: d.ID, Name: d.Name, Reason: "sem subcategoria de preset",
 			})
@@ -379,12 +403,7 @@ func (s *Service) MaterializeAll(ctx context.Context, reference string) (BulkRes
 		if amount <= 0 {
 			continue
 		}
-		tx, berr := s.buildTransaction(d, amount, MaterializeInput{})
-		if berr != nil {
-			res.Skipped = append(res.Skipped, SkippedDestination{DestinationID: d.ID, Name: d.Name, Reason: "preset incompleto"})
-			continue
-		}
-		txID, cerr := s.txns.Create(ctx, tx)
+		txID, cerr := s.materializeTx(ctx, d, amount, MaterializeInput{})
 		if cerr != nil {
 			return res, cerr // mês bloqueado etc. aborta o lote
 		}
@@ -436,7 +455,7 @@ func (s *Service) ApplyTemplate(ctx context.Context, reference, templateID strin
 			ID: uuid.New().String(), Reference: reference, Name: it.Name, Kind: it.Kind, Mode: it.Mode,
 			Percentage: it.Percentage, FixedAmount: it.FixedAmount, PresetSubcategoryID: it.PresetSubcategoryID,
 			PresetPaymentMethod: it.PresetPaymentMethod, PresetDescription: it.PresetDescription,
-			DisplayOrder: i, CreatedAt: now, UpdatedAt: now,
+			CaixinhaID: it.CaixinhaID, DisplayOrder: i, CreatedAt: now, UpdatedAt: now,
 		})
 	}
 	return s.repo.CreateDestinations(ctx, dests)
@@ -459,7 +478,7 @@ func (s *Service) CopyPrevious(ctx context.Context, reference string) error {
 			ID: uuid.New().String(), Reference: reference, Name: d.Name, Kind: d.Kind, Mode: d.Mode,
 			Percentage: d.Percentage, FixedAmount: d.FixedAmount, PresetSubcategoryID: d.PresetSubcategoryID,
 			PresetPaymentMethod: d.PresetPaymentMethod, PresetDescription: d.PresetDescription,
-			DisplayOrder: i, CreatedAt: now, UpdatedAt: now,
+			CaixinhaID: d.CaixinhaID, DisplayOrder: i, CreatedAt: now, UpdatedAt: now,
 		})
 	}
 	return s.repo.CreateDestinations(ctx, dests)
@@ -491,6 +510,6 @@ func fromInput(id string, in DestinationInput, createdAt time.Time) Destination 
 		ID: id, Reference: in.Reference, Name: in.Name, Kind: in.Kind, Mode: in.Mode,
 		Percentage: in.Percentage, FixedAmount: in.FixedAmount, PresetSubcategoryID: in.PresetSubcategoryID,
 		PresetPaymentMethod: in.PresetPaymentMethod, PresetDescription: in.PresetDescription,
-		DisplayOrder: in.DisplayOrder, CreatedAt: createdAt, UpdatedAt: time.Now().UTC(),
+		CaixinhaID: in.CaixinhaID, DisplayOrder: in.DisplayOrder, CreatedAt: createdAt, UpdatedAt: time.Now().UTC(),
 	}
 }

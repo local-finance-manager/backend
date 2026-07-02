@@ -78,6 +78,7 @@ type Transaction struct {
 	AccountID            *string // nullable v1
 	DestinationAccountID *string // nullable v1
 	CreditCardID         *string // nullable; só quando paymentMethod=cartao_credito
+	CaixinhaID           *string // nullable; preenchido quando é um movimento de caixinha (aporte/resgate)
 	InstallmentGroupID   *string // nullable; preenchido quando é parcela de uma compra parcelada
 	InstallmentNumber    *int    // k (1-based), nullable
 	InstallmentTotal     *int    // N, nullable
@@ -124,7 +125,12 @@ type Summary struct {
 	// carryover (receita-despesa realizado antes de CompetenceDateFrom) + ajustes de
 	// saldo realizados (is_balance_adjustment) até CompetenceDateTo.
 	SaldoInicial int64 `json:"saldoInicial"`
-	// SaldoFinal = SaldoInicial + SaldoPeriodo (saldo acumulado de fechamento).
+	// MovimentacaoCaixinhas é o efeito líquido dos movimentos de caixinha realizados
+	// no período (resgates − aportes), pela data de caixa. Aporte reduz o disponível;
+	// resgate aumenta. Fica fora de TotalDespesas/TotalReceitas/SaldoPeriodo (é
+	// transferência), mas entra no SaldoFinal (disponível).
+	MovimentacaoCaixinhas int64 `json:"movimentacaoCaixinhas"`
+	// SaldoFinal = SaldoInicial + SaldoPeriodo + MovimentacaoCaixinhas (disponível de fechamento).
 	SaldoFinal int64 `json:"saldoFinal"`
 }
 
@@ -144,6 +150,8 @@ type TransactionFilter struct {
 	PaymentDateTo      *string // YYYY-MM-DD inclusive
 	Search             *string // LOWER(title) LIKE '%search%'
 	CreditCardID       *string // filtra lançamentos vinculados a um cartão
+	CaixinhaID         *string // filtra os movimentos de uma caixinha (extrato)
+	IncludeCaixinha    bool    // quando false (default), a lista ESCONDE movimentos de caixinha
 	InstallmentGroupID *string // filtra as parcelas de uma compra parcelada
 }
 
@@ -178,6 +186,7 @@ type CreateTransactionInput struct {
 	AccountID            *string
 	DestinationAccountID *string
 	CreditCardID         *string
+	CaixinhaID           *string // preenchido só pelo CaixinhaWriter (movimento neutro)
 }
 
 // UpdateTransactionInput carries all mutable fields for a PUT full-replace.

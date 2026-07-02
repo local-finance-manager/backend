@@ -66,3 +66,12 @@ type CategoryTreeReader interface {
 type PaymentBreakdownReader interface {
 	PaymentBreakdownMonth(ctx context.Context, reference string) (map[string]int64, error)
 }
+
+// CashAggregator agrega pelo regime de CAIXA (por data de pagamento) sobre um intervalo
+// arbitrário [from,to] (YYYY-MM-DD). Apurado ao vivo (não usa snapshot), em todos os
+// períodos. Implementado pelo módulo transaction.
+type CashAggregator interface {
+	AggregateCashPeriod(ctx context.Context, from, to string) ([]shared.SubcategoryAggregate, shared.MonthlyTotals, error)
+	AggregateCashPending(ctx context.Context, from, to string) ([]shared.SubcategoryAggregate, shared.MonthlyTotals, error)
+	PaymentBreakdownCash(ctx context.Context, from, to string) (map[string]int64, error)
+}

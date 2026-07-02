@@ -25,6 +25,7 @@ import (
 	"github.com/local-finance-manager/backend/internal/database"
 	"github.com/local-finance-manager/backend/internal/installment"
 	"github.com/local-finance-manager/backend/internal/middleware"
+	"github.com/local-finance-manager/backend/internal/patrimonio"
 	"github.com/local-finance-manager/backend/internal/report"
 	"github.com/local-finance-manager/backend/internal/transaction"
 )
@@ -200,6 +201,7 @@ func run(log *slog.Logger) error {
 		Pending:  reportAggregator,
 		Tree:     categoryTree,
 		Payments: reportAggregator,
+		Cash:     transaction.NewCashAggregator(db), // regime de caixa (R8, por data de pagamento)
 	})
 	reportHandler := report.NewHandler(reportService)
 
@@ -220,13 +222,26 @@ func run(log *slog.Logger) error {
 
 	// Alocação de receitas (budget): owner dos destinos/templates. Consome a renda do
 	// mês e cria/exclui lançamentos via ports do transaction (que aplicam o guard).
+	// Patrimônio (caixinhas): owner da tabela caixinhas. Cria/exclui os movimentos
+	// neutros (aporte/resgate) e lê saldos/disponível via ports do transaction.
+	caixinhaWriter := transaction.NewCaixinhaWriter(createTransaction, deleteTransaction)
+	caixinhaReader := transaction.NewCaixinhaReader(db)
+
 	budgetService := budget.NewService(budget.Deps{
 		Repo:           budget.NewSQLiteRepository(db),
 		Income:         transaction.NewIncomeReader(db),
 		Txns:           transaction.NewBudgetWriter(createTransaction, deleteTransaction),
+		Caixinha:       caixinhaWriter, // destino que aponta p/ caixinha materializa como aporte (6.1)
 		InvestSubcatID: "sub-trf-aporte", // "Aporte em Investimentos" (seed transferência) — A4
 	})
 	budgetHandler := budget.NewHandler(budgetService)
+	patrimonioService := patrimonio.NewService(patrimonio.Deps{
+		Repo:       patrimonio.NewSQLiteRepository(db),
+		Movements:  caixinhaReader,
+		Writer:     caixinhaWriter,
+		Disponivel: caixinhaReader,
+	})
+	patrimonioHandler := patrimonio.NewHandler(patrimonioService)
 
 	creditCardHandler := creditcard.NewHandler(creditcard.HandlerDeps{
 		Create:       creditcard.NewCreateCreditCard(ccRepo),
@@ -287,6 +302,7 @@ func run(log *slog.Logger) error {
 	r.Route("/api/installments", installment.Routes(installmentHandler))
 	r.Route("/api/reports", report.Routes(reportHandler))
 	r.Route("/api/income", budget.Routes(budgetHandler))
+	r.Route("/api/patrimonio", patrimonio.Routes(patrimonioHandler))
 	r.Route("/api/backup", backup.Routes(backup.NewHandler(backupSvc)))
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {

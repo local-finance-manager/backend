@@ -27,6 +27,7 @@ type TemplateItem struct {
 	PresetSubcategoryID *string
 	PresetPaymentMethod *string
 	PresetDescription   *string
+	CaixinhaID          *string
 	DisplayOrder        int
 }
 
@@ -65,4 +66,11 @@ type IncomeReader interface {
 type TransactionWriter interface {
 	Create(ctx context.Context, in shared.NewTransaction) (string, error)
 	Delete(ctx context.Context, id string) error
+}
+
+// CaixinhaAporter registra um aporte numa caixinha (quando o destino aponta para uma).
+// Implementado por transaction.CaixinhaWriter. Devolve o id do lançamento criado, que é
+// guardado como materialização do destino (Undo o exclui via TransactionWriter.Delete).
+type CaixinhaAporter interface {
+	RegisterAporte(ctx context.Context, caixinhaID string, amount int64, date string, desc *string) (string, error)
 }

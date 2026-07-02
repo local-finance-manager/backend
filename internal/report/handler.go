@@ -38,7 +38,7 @@ func (h *Handler) Monthly(w http.ResponseWriter, r *http.Request) {
 		ref = time.Now().UTC().Format("2006-01")
 	}
 	mode := r.URL.Query().Get("mode")
-	rep, err := h.svc.Monthly(r.Context(), ref, mode)
+	rep, err := h.svc.Monthly(r.Context(), ref, mode, r.URL.Query().Get("regime"))
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return
@@ -46,12 +46,12 @@ func (h *Handler) Monthly(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-// Quarterly — GET /api/reports/quarterly?year=YYYY&quarter=1..4
+// Quarterly — GET /api/reports/quarterly?year=YYYY&quarter=1..4[&regime=caixa|competencia]
 func (h *Handler) Quarterly(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	year := qInt(r, "year", now.Year())
 	quarter := qInt(r, "quarter", (int(now.Month())-1)/3+1)
-	rep, err := h.svc.Quarterly(r.Context(), year, quarter)
+	rep, err := h.svc.Quarterly(r.Context(), year, quarter, r.URL.Query().Get("regime"))
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return
@@ -68,7 +68,7 @@ func (h *Handler) Semiannual(w http.ResponseWriter, r *http.Request) {
 	}
 	year := qInt(r, "year", now.Year())
 	half := qInt(r, "half", defHalf)
-	rep, err := h.svc.Semiannual(r.Context(), year, half)
+	rep, err := h.svc.Semiannual(r.Context(), year, half, r.URL.Query().Get("regime"))
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return
@@ -76,10 +76,10 @@ func (h *Handler) Semiannual(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-// Annual — GET /api/reports/annual?year=YYYY
+// Annual — GET /api/reports/annual?year=YYYY[&regime=caixa|competencia]
 func (h *Handler) Annual(w http.ResponseWriter, r *http.Request) {
 	year := qInt(r, "year", time.Now().UTC().Year())
-	rep, err := h.svc.Annual(r.Context(), year)
+	rep, err := h.svc.Annual(r.Context(), year, r.URL.Query().Get("regime"))
 	if err != nil {
 		domainerr.WriteError(w, err)
 		return

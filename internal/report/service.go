@@ -16,6 +16,7 @@ type Deps struct {
 	Pending  PendingAggregator
 	Tree     CategoryTreeReader
 	Payments PaymentBreakdownReader
+	Cash     CashAggregator
 }
 
 // Service orquestra fechamento, recálculo, lock e leitura dos relatórios.
@@ -25,6 +26,7 @@ type Service struct {
 	pending  PendingAggregator
 	tree     CategoryTreeReader
 	payments PaymentBreakdownReader
+	cash     CashAggregator
 	now      func() time.Time
 }
 
@@ -32,8 +34,22 @@ type Service struct {
 func NewService(d Deps) *Service {
 	return &Service{
 		repo: d.Repo, realized: d.Realized, pending: d.Pending,
-		tree: d.Tree, payments: d.Payments, now: time.Now,
+		tree: d.Tree, payments: d.Payments, cash: d.Cash, now: time.Now,
 	}
+}
+
+// RegimeCaixa é a lente padrão (por data de pagamento); RegimeCompetencia usa snapshot.
+const (
+	RegimeCaixa       = "caixa"
+	RegimeCompetencia = "competencia"
+)
+
+// normalizeRegime devolve o regime válido (default: caixa).
+func normalizeRegime(regime string) string {
+	if regime == RegimeCompetencia {
+		return RegimeCompetencia
+	}
+	return RegimeCaixa
 }
 
 func (s *Service) today() string { return s.now().UTC().Format("2006-01-02") }
@@ -206,28 +222,45 @@ func (s *Service) ListClosings(ctx context.Context) ([]ClosingView, error) {
 
 // ─── Leitura: relatório mensal ───────────────────────────────────────────────
 
-// Monthly monta o relatório de um mês (modo "realizado" ou "projetivo").
-func (s *Service) Monthly(ctx context.Context, reference, mode string) (Report, error) {
+// Monthly monta o relatório de um mês, no regime (caixa/competência) e modo
+// (realizado/projetivo) escolhidos. Padrão: caixa + realizado.
+func (s *Service) Monthly(ctx context.Context, reference, mode, regime string) (Report, error) {
 	if _, _, err := ParseReference(reference); err != nil {
 		return Report{}, err
 	}
+	regime = normalizeRegime(regime)
 	lk, err := s.lookup(ctx)
 	if err != nil {
 		return Report{}, err
 	}
+	first, last, _ := monthDayBounds(reference)
+	status := s.monthLockState(ctx, reference)
 
-	aggs, totals, status, err := s.monthData(ctx, reference)
-	if err != nil {
-		return Report{}, err
+	var aggs []shared.SubcategoryAggregate
+	var totals shared.MonthlyTotals
+	var payMap map[string]int64
+
+	if regime == RegimeCompetencia {
+		var derr error
+		aggs, totals, _, derr = s.monthData(ctx, reference)
+		if derr != nil {
+			return Report{}, derr
+		}
+		payMap, _ = s.payments.PaymentBreakdownMonth(ctx, reference)
+	} else {
+		var aerr error
+		aggs, totals, aerr = s.cash.AggregateCashPeriod(ctx, first, last)
+		if aerr != nil {
+			return Report{}, domainerr.NewInternal("erro ao agregar o caixa do mês")
+		}
+		payMap, _ = s.cash.PaymentBreakdownCash(ctx, first, last)
 	}
 
-	// distribuição por forma de pagamento + % no crédito (mensal, ao vivo)
-	payMap, _ := s.payments.PaymentBreakdownMonth(ctx, reference)
 	percentCred := pct(payMap["cartao_credito"], totals.Despesas)
-
 	rep := Report{
 		Scope:          "monthly",
 		Reference:      reference,
+		Regime:         regime,
 		Mode:           "realizado",
 		Status:         status,
 		KPIs:           BuildKPIs(totals, aggs, percentCred),
@@ -237,17 +270,33 @@ func (s *Service) Monthly(ctx context.Context, reference, mode string) (Report, 
 
 	prevRef, _ := PrevReference(reference)
 	yoyRef, _ := SameMonthPrevYear(reference)
-	prevTotals, prevClosed, prevAggs := s.refTotals(ctx, prevRef)
-	yoyTotals, yoyClosed, _ := s.refTotals(ctx, yoyRef)
+	var prevTotals, yoyTotals shared.MonthlyTotals
+	var prevPartial, yoyPartial bool
+	var prevAggs []shared.SubcategoryAggregate
+	if regime == RegimeCompetencia {
+		var prevClosed, yoyClosed bool
+		prevTotals, prevClosed, prevAggs = s.refTotals(ctx, prevRef)
+		yoyTotals, yoyClosed, _ = s.refTotals(ctx, yoyRef)
+		prevPartial, yoyPartial = !prevClosed, !yoyClosed
+	} else {
+		// caixa é ao vivo — nunca "parcial" por fechamento
+		prevTotals, prevAggs = s.cashMonthTotals(ctx, prevRef)
+		yoyTotals, _ = s.cashMonthTotals(ctx, yoyRef)
+	}
 	rep.Comparativos = Comparativos{
-		PeriodoAnterior:         BuildComparison(prevRef, !prevClosed, totals, prevTotals),
-		MesmoPeriodoAnoAnterior: BuildComparison(yoyRef, !yoyClosed, totals, yoyTotals),
+		PeriodoAnterior:         BuildComparison(prevRef, prevPartial, totals, prevTotals),
+		MesmoPeriodoAnoAnterior: BuildComparison(yoyRef, yoyPartial, totals, yoyTotals),
 	}
 	rep.Insights = BuildInsights(rep.Analitico, rep.KPIs, rep.Comparativos.PeriodoAnterior, despesaByCat(prevAggs))
 
 	if mode == "projetivo" {
-		pAggs, pTotals, perr := s.pending.AggregatePendingMonth(ctx, reference)
-		_ = pAggs
+		var pTotals shared.MonthlyTotals
+		var perr error
+		if regime == RegimeCompetencia {
+			_, pTotals, perr = s.pending.AggregatePendingMonth(ctx, reference)
+		} else {
+			_, pTotals, perr = s.cash.AggregateCashPending(ctx, first, last)
+		}
 		if perr == nil {
 			rep.Mode = "projetivo"
 			rep.Projetado = &Projetado{
@@ -258,6 +307,37 @@ func (s *Service) Monthly(ctx context.Context, reference, mode string) (Report, 
 		}
 	}
 	return rep, nil
+}
+
+// monthDayBounds devolve o 1º e o último dia (YYYY-MM-DD) do mês de uma referência.
+func monthDayBounds(reference string) (string, string, error) {
+	last, err := MonthLastDay(reference)
+	if err != nil {
+		return "", "", err
+	}
+	return reference + "-01", last, nil
+}
+
+// monthLockState devolve o estado de bloqueio do mês (independe do regime).
+func (s *Service) monthLockState(ctx context.Context, reference string) LockState {
+	c, exists, err := s.repo.GetClosing(ctx, reference)
+	if err != nil || !exists {
+		return StateOpen
+	}
+	return DeriveLockState(true, c.HardLockAt, s.today())
+}
+
+// cashMonthTotals agrega o caixa (por data de pagamento) de um mês (comparativo caixa).
+func (s *Service) cashMonthTotals(ctx context.Context, reference string) (shared.MonthlyTotals, []shared.SubcategoryAggregate) {
+	first, last, err := monthDayBounds(reference)
+	if err != nil {
+		return shared.MonthlyTotals{}, nil
+	}
+	aggs, totals, aerr := s.cash.AggregateCashPeriod(ctx, first, last)
+	if aerr != nil {
+		return shared.MonthlyTotals{}, nil
+	}
+	return totals, aggs
 }
 
 // monthData retorna os agregados/totais de um mês: do snapshot se fechado, ao vivo
@@ -298,12 +378,12 @@ func (s *Service) refTotals(ctx context.Context, reference string) (shared.Month
 
 // ─── Leitura: períodos longos ────────────────────────────────────────────────
 
-// Quarterly monta o relatório trimestral (soma dos meses fechados do trimestre).
-func (s *Service) Quarterly(ctx context.Context, year, quarter int) (Report, error) {
+// Quarterly monta o relatório trimestral no regime escolhido (padrão caixa).
+func (s *Service) Quarterly(ctx context.Context, year, quarter int, regime string) (Report, error) {
 	if quarter < 1 || quarter > 4 {
 		return Report{}, domainerr.NewBadRequest("trimestre inválido (1..4)", domainerr.WithDisplayable())
 	}
-	rep, err := s.longPeriod(ctx, MonthsInQuarter(year, quarter), MonthsInQuarter(year-1, quarter), prevQuarterMonths(year, quarter))
+	rep, err := s.longPeriod(ctx, MonthsInQuarter(year, quarter), MonthsInQuarter(year-1, quarter), prevQuarterMonths(year, quarter), regime)
 	if err != nil {
 		return Report{}, err
 	}
@@ -311,28 +391,26 @@ func (s *Service) Quarterly(ctx context.Context, year, quarter int) (Report, err
 	return rep, nil
 }
 
-// Semiannual monta o relatório semestral.
-func (s *Service) Semiannual(ctx context.Context, year, half int) (Report, error) {
+// Semiannual monta o relatório semestral no regime escolhido (padrão caixa).
+func (s *Service) Semiannual(ctx context.Context, year, half int, regime string) (Report, error) {
 	if half < 1 || half > 2 {
 		return Report{}, domainerr.NewBadRequest("semestre inválido (1..2)", domainerr.WithDisplayable())
 	}
 	prevMonths := MonthsInSemester(year, 1)
-	prevYear := year
 	if half == 1 {
-		prevYear, prevMonths = year-1, MonthsInSemester(year-1, 2)
+		prevMonths = MonthsInSemester(year-1, 2)
 	}
-	rep, err := s.longPeriod(ctx, MonthsInSemester(year, half), MonthsInSemester(year-1, half), prevMonths)
+	rep, err := s.longPeriod(ctx, MonthsInSemester(year, half), MonthsInSemester(year-1, half), prevMonths, regime)
 	if err != nil {
 		return Report{}, err
 	}
-	_ = prevYear
 	rep.Scope, rep.Year, rep.Half = "semiannual", year, half
 	return rep, nil
 }
 
-// Annual monta o relatório anual.
-func (s *Service) Annual(ctx context.Context, year int) (Report, error) {
-	rep, err := s.longPeriod(ctx, MonthsInYear(year), MonthsInYear(year-1), MonthsInYear(year-1))
+// Annual monta o relatório anual no regime escolhido (padrão caixa).
+func (s *Service) Annual(ctx context.Context, year int, regime string) (Report, error) {
+	rep, err := s.longPeriod(ctx, MonthsInYear(year), MonthsInYear(year-1), MonthsInYear(year-1), regime)
 	if err != nil {
 		return Report{}, err
 	}
@@ -350,10 +428,14 @@ func prevQuarterMonths(year, quarter int) []string {
 // longPeriod soma snapshots dos meses fechados de `months`, lista os não incluídos,
 // monta analítico/KPIs/comparativos (vs. período anterior e vs. mesmo período ano
 // anterior) e o gráfico mês a mês.
-func (s *Service) longPeriod(ctx context.Context, months, yoyMonths, prevMonths []string) (Report, error) {
+func (s *Service) longPeriod(ctx context.Context, months, yoyMonths, prevMonths []string, regime string) (Report, error) {
+	regime = normalizeRegime(regime)
 	lk, err := s.lookup(ctx)
 	if err != nil {
 		return Report{}, err
+	}
+	if regime == RegimeCaixa {
+		return s.longPeriodCash(ctx, lk, months, yoyMonths, prevMonths)
 	}
 
 	closings, err := s.repo.ClosingsForRefs(ctx, months)
@@ -394,6 +476,7 @@ func (s *Service) longPeriod(ctx context.Context, months, yoyMonths, prevMonths 
 	yoyTotals, yoyClosedAll, _ := s.periodTotals(ctx, yoyMonths)
 
 	rep := Report{
+		Regime:         RegimeCompetencia,
 		KPIs:           BuildKPIs(totals, aggs, 0),
 		Analitico:      BuildAnalitico(aggs, lk),
 		IncludedMonths: included,
@@ -406,6 +489,62 @@ func (s *Service) longPeriod(ctx context.Context, months, yoyMonths, prevMonths 
 	}
 	rep.Insights = BuildInsights(rep.Analitico, rep.KPIs, rep.Comparativos.PeriodoAnterior, despesaByCat(prevAggs))
 	return rep, nil
+}
+
+// longPeriodCash monta o relatório de período longo no regime de CAIXA: apura ao vivo por
+// data de pagamento sobre todo o intervalo (não depende de meses fechados). IncludedMonths
+// = todos; MissingMonths = vazio. Mês a mês e comparativos também por caixa.
+func (s *Service) longPeriodCash(ctx context.Context, lk *CategoryLookup, months, yoyMonths, prevMonths []string) (Report, error) {
+	from, _, _ := monthDayBounds(months[0])
+	_, to, _ := monthDayBounds(months[len(months)-1])
+	aggs, totals, err := s.cash.AggregateCashPeriod(ctx, from, to)
+	if err != nil {
+		return Report{}, domainerr.NewInternal("erro ao agregar o caixa do período")
+	}
+
+	monthly := make([]MonthlyPoint, 0, len(months))
+	for _, m := range months {
+		mt, _ := s.cashMonthTotals(ctx, m)
+		monthly = append(monthly, MonthlyPoint{
+			Reference:           m,
+			TotalDespesas:       mt.Despesas,
+			TotalReceitas:       mt.Receitas,
+			TotalTransferencias: mt.Transferencias,
+			SaldoAcumulado:      mt.SaldoFinal,
+		})
+	}
+
+	prevTotals, prevAggs := s.cashPeriodTotals(ctx, prevMonths)
+	yoyTotals, _ := s.cashPeriodTotals(ctx, yoyMonths)
+
+	rep := Report{
+		Regime:         RegimeCaixa,
+		KPIs:           BuildKPIs(totals, aggs, 0),
+		Analitico:      BuildAnalitico(aggs, lk),
+		IncludedMonths: months,
+		MissingMonths:  []string{},
+		Monthly:        monthly,
+		Comparativos: Comparativos{
+			PeriodoAnterior:         BuildComparison(prevMonths[0]+".."+prevMonths[len(prevMonths)-1], false, totals, prevTotals),
+			MesmoPeriodoAnoAnterior: BuildComparison(yoyMonths[0]+".."+yoyMonths[len(yoyMonths)-1], false, totals, yoyTotals),
+		},
+	}
+	rep.Insights = BuildInsights(rep.Analitico, rep.KPIs, rep.Comparativos.PeriodoAnterior, despesaByCat(prevAggs))
+	return rep, nil
+}
+
+// cashPeriodTotals agrega o caixa sobre o intervalo coberto por `months`.
+func (s *Service) cashPeriodTotals(ctx context.Context, months []string) (shared.MonthlyTotals, []shared.SubcategoryAggregate) {
+	if len(months) == 0 {
+		return shared.MonthlyTotals{}, nil
+	}
+	from, _, _ := monthDayBounds(months[0])
+	_, to, _ := monthDayBounds(months[len(months)-1])
+	aggs, totals, err := s.cash.AggregateCashPeriod(ctx, from, to)
+	if err != nil {
+		return shared.MonthlyTotals{}, nil
+	}
+	return totals, aggs
 }
 
 // periodTotals soma os totais dos meses FECHADOS de um conjunto de referências;

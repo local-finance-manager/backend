@@ -7,7 +7,7 @@ MODULE    = github.com/local-finance-manager/backend
 #   negócio). O backup é coberto inclusive no adapter do Drive (mock httptest) e no fluxo
 #   OAuth Authorize (loopback + endpoint de token mockado).
 COVER_PKGS = ./internal/backup/... ./internal/budget/... ./internal/category/... ./internal/creditcard/... \
-             ./internal/installment/... ./internal/report/... ./internal/shared/... ./internal/transaction/...
+             ./internal/installment/... ./internal/patrimonio/... ./internal/report/... ./internal/shared/... ./internal/transaction/...
 
 # Piso de cobertura exigido por módulo.
 COVER_MIN = 90

@@ -110,6 +110,7 @@ func (uc *createTransactionImpl) Execute(ctx context.Context, in CreateTransacti
 		AccountID:            in.AccountID,
 		DestinationAccountID: in.DestinationAccountID,
 		CreditCardID:         in.CreditCardID,
+		CaixinhaID:           in.CaixinhaID,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}

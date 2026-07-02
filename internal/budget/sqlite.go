@@ -17,21 +17,22 @@ func NewSQLiteRepository(db *sql.DB) *SQLiteRepository { return &SQLiteRepositor
 
 const destCols = `id, reference, name, kind, mode, percentage, fixed_amount,
 	preset_subcategory_id, preset_payment_method, preset_description, display_order,
-	materialized_transaction_id, materialized_amount, materialized_at, created_at, updated_at`
+	materialized_transaction_id, materialized_amount, materialized_at, created_at, updated_at, caixinha_id`
 
 func scanDestination(s interface{ Scan(...any) error }) (Destination, error) {
 	var d Destination
 	var pct, matAmt sql.NullInt64
 	var fixed sql.NullInt64
-	var presetSub, presetPm, presetDesc, matTx, matAt sql.NullString
+	var presetSub, presetPm, presetDesc, matTx, matAt, caixinhaID sql.NullString
 	var createdAt, updatedAt string
 	if err := s.Scan(
 		&d.ID, &d.Reference, &d.Name, &d.Kind, &d.Mode, &pct, &fixed,
 		&presetSub, &presetPm, &presetDesc, &d.DisplayOrder,
-		&matTx, &matAmt, &matAt, &createdAt, &updatedAt,
+		&matTx, &matAmt, &matAt, &createdAt, &updatedAt, &caixinhaID,
 	); err != nil {
 		return Destination{}, err
 	}
+	d.CaixinhaID = nullToPtr(caixinhaID)
 	if pct.Valid {
 		v := int(pct.Int64)
 		d.Percentage = &v
@@ -86,7 +87,7 @@ func (r *SQLiteRepository) GetDestination(ctx context.Context, id string) (Desti
 }
 
 const insertDestSQL = `INSERT INTO allocation_destination (` + destCols + `)
-	VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+	VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 func destArgs(d Destination) []any {
 	return []any{
@@ -95,6 +96,7 @@ func destArgs(d Destination) []any {
 		strPtrToNull(d.PresetSubcategoryID), strPtrToNull(d.PresetPaymentMethod), strPtrToNull(d.PresetDescription),
 		d.DisplayOrder, strPtrToNull(d.MaterializedTxID), int64PtrToNull(d.MaterializedAmount),
 		timePtrToNull(d.MaterializedAt), d.CreatedAt.UTC().Format(time.RFC3339), d.UpdatedAt.UTC().Format(time.RFC3339),
+		strPtrToNull(d.CaixinhaID),
 	}
 }
 
@@ -130,11 +132,11 @@ func (r *SQLiteRepository) CreateDestinations(ctx context.Context, ds []Destinat
 func (r *SQLiteRepository) UpdateDestination(ctx context.Context, d Destination) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE allocation_destination SET name=?, kind=?, mode=?, percentage=?, fixed_amount=?,
-			preset_subcategory_id=?, preset_payment_method=?, preset_description=?, display_order=?, updated_at=?
+			preset_subcategory_id=?, preset_payment_method=?, preset_description=?, caixinha_id=?, display_order=?, updated_at=?
 		WHERE id=?`,
 		d.Name, string(d.Kind), string(d.Mode), ptrToNullInt(d.Percentage), int64PtrToNull(d.FixedAmount),
 		strPtrToNull(d.PresetSubcategoryID), strPtrToNull(d.PresetPaymentMethod), strPtrToNull(d.PresetDescription),
-		d.DisplayOrder, time.Now().UTC().Format(time.RFC3339), d.ID)
+		strPtrToNull(d.CaixinhaID), d.DisplayOrder, time.Now().UTC().Format(time.RFC3339), d.ID)
 	if err != nil {
 		return fmt.Errorf("budget repo: update destination: %w", err)
 	}
@@ -233,7 +235,7 @@ func (r *SQLiteRepository) GetTemplate(ctx context.Context, id string) (Template
 func (r *SQLiteRepository) templateItems(ctx context.Context, templateID string) ([]TemplateItem, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, name, kind, mode, percentage, fixed_amount,
-			preset_subcategory_id, preset_payment_method, preset_description, display_order
+			preset_subcategory_id, preset_payment_method, preset_description, display_order, caixinha_id
 		FROM allocation_template_item WHERE template_id = ? ORDER BY display_order`, templateID)
 	if err != nil {
 		return nil, fmt.Errorf("budget repo: template items: %w", err)
@@ -243,8 +245,8 @@ func (r *SQLiteRepository) templateItems(ctx context.Context, templateID string)
 	for rows.Next() {
 		var it TemplateItem
 		var pct, fixed sql.NullInt64
-		var sub, pm, desc sql.NullString
-		if err := rows.Scan(&it.ID, &it.Name, &it.Kind, &it.Mode, &pct, &fixed, &sub, &pm, &desc, &it.DisplayOrder); err != nil {
+		var sub, pm, desc, caixinhaID sql.NullString
+		if err := rows.Scan(&it.ID, &it.Name, &it.Kind, &it.Mode, &pct, &fixed, &sub, &pm, &desc, &it.DisplayOrder, &caixinhaID); err != nil {
 			return nil, fmt.Errorf("budget repo: scan template item: %w", err)
 		}
 		if pct.Valid {
@@ -257,6 +259,7 @@ func (r *SQLiteRepository) templateItems(ctx context.Context, templateID string)
 		it.PresetSubcategoryID = nullToPtr(sub)
 		it.PresetPaymentMethod = nullToPtr(pm)
 		it.PresetDescription = nullToPtr(desc)
+		it.CaixinhaID = nullToPtr(caixinhaID)
 		out = append(out, it)
 	}
 	return out, rows.Err()
@@ -277,10 +280,10 @@ func (r *SQLiteRepository) CreateTemplate(ctx context.Context, t Template) error
 	for _, it := range t.Items {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO allocation_template_item
-			(id, template_id, name, kind, mode, percentage, fixed_amount, preset_subcategory_id, preset_payment_method, preset_description, display_order)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			(id, template_id, name, kind, mode, percentage, fixed_amount, preset_subcategory_id, preset_payment_method, preset_description, display_order, caixinha_id)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 			it.ID, t.ID, it.Name, string(it.Kind), string(it.Mode), ptrToNullInt(it.Percentage), int64PtrToNull(it.FixedAmount),
-			strPtrToNull(it.PresetSubcategoryID), strPtrToNull(it.PresetPaymentMethod), strPtrToNull(it.PresetDescription), it.DisplayOrder,
+			strPtrToNull(it.PresetSubcategoryID), strPtrToNull(it.PresetPaymentMethod), strPtrToNull(it.PresetDescription), it.DisplayOrder, strPtrToNull(it.CaixinhaID),
 		); err != nil {
 			return fmt.Errorf("budget repo: insert template item: %w", err)
 		}

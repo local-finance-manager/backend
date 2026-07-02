@@ -57,6 +57,7 @@ type destinationReq struct {
 	PresetSubcategoryID *string `json:"presetSubcategoryId"`
 	PresetPaymentMethod *string `json:"presetPaymentMethod"`
 	PresetDescription   *string `json:"presetDescription"`
+	CaixinhaID          *string `json:"caixinhaId"`
 	DisplayOrder        int     `json:"displayOrder"`
 }
 
@@ -64,7 +65,8 @@ func (req destinationReq) toInput() DestinationInput {
 	return DestinationInput{
 		Reference: req.Reference, Name: req.Name, Kind: Kind(req.Kind), Mode: Mode(req.Mode),
 		Percentage: req.Percentage, FixedAmount: req.FixedAmount, PresetSubcategoryID: req.PresetSubcategoryID,
-		PresetPaymentMethod: req.PresetPaymentMethod, PresetDescription: req.PresetDescription, DisplayOrder: req.DisplayOrder,
+		PresetPaymentMethod: req.PresetPaymentMethod, PresetDescription: req.PresetDescription,
+		CaixinhaID: req.CaixinhaID, DisplayOrder: req.DisplayOrder,
 	}
 }
 
@@ -171,6 +173,7 @@ type templateItemReq struct {
 	PresetSubcategoryID *string `json:"presetSubcategoryId"`
 	PresetPaymentMethod *string `json:"presetPaymentMethod"`
 	PresetDescription   *string `json:"presetDescription"`
+	CaixinhaID          *string `json:"caixinhaId"`
 }
 
 type createTemplateReq struct {
@@ -190,6 +193,7 @@ func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
 			Name: it.Name, Kind: Kind(it.Kind), Mode: Mode(it.Mode), Percentage: it.Percentage,
 			FixedAmount: it.FixedAmount, PresetSubcategoryID: it.PresetSubcategoryID,
 			PresetPaymentMethod: it.PresetPaymentMethod, PresetDescription: it.PresetDescription,
+			CaixinhaID: it.CaixinhaID,
 		}
 	}
 	t, err := h.svc.CreateTemplate(r.Context(), req.Name, items)
@@ -237,6 +241,7 @@ type templateItemView struct {
 	PresetSubcategoryID *string `json:"presetSubcategoryId"`
 	PresetPaymentMethod *string `json:"presetPaymentMethod"`
 	PresetDescription   *string `json:"presetDescription"`
+	CaixinhaID          *string `json:"caixinhaId"`
 }
 
 type templateView struct {
@@ -254,6 +259,7 @@ func toTemplateViews(ts []Template) []templateView {
 				Name: it.Name, Kind: string(it.Kind), Mode: string(it.Mode), Percentage: it.Percentage,
 				FixedAmount: it.FixedAmount, PresetSubcategoryID: it.PresetSubcategoryID,
 				PresetPaymentMethod: it.PresetPaymentMethod, PresetDescription: it.PresetDescription,
+				CaixinhaID: it.CaixinhaID,
 			}
 		}
 		out[i] = templateView{ID: t.ID, Name: t.Name, Items: items}
